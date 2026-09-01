@@ -11,7 +11,7 @@ fn taffy_flex_column_grow() {
         .new_leaf(Style {
             size: Size {
                 width: auto(),
-                height: length(48.0),
+                height: length(48.0_f32),
             },
             ..Default::default()
         })
@@ -19,10 +19,10 @@ fn taffy_flex_column_grow() {
     let rest = taffy
         .new_leaf(Style {
             flex_grow: 1.0,
-            flex_basis: length(0.0),
+            flex_basis: length(0.0_f32),
             min_size: Size {
                 width: auto(),
-                height: length(0.0),
+                height: length(0.0_f32),
             },
             ..Default::default()
         })
@@ -33,8 +33,8 @@ fn taffy_flex_column_grow() {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
                 size: Size {
-                    width: length(1200.0),
-                    height: length(800.0),
+                    width: length(1200.0_f32),
+                    height: length(800.0_f32),
                 },
                 ..Default::default()
             },
@@ -46,8 +46,8 @@ fn taffy_flex_column_grow() {
         .compute_layout(
             container,
             Size {
-                width: length(1200.0),
-                height: length(800.0),
+                width: length(1200.0_f32),
+                height: length(800.0_f32),
             },
         )
         .unwrap();
@@ -71,7 +71,7 @@ fn taffy_flex_grow_with_percent_basis() {
         .new_leaf(Style {
             size: Size {
                 width: auto(),
-                height: length(48.0),
+                height: length(48.0_f32),
             },
             ..Default::default()
         })
@@ -79,10 +79,10 @@ fn taffy_flex_grow_with_percent_basis() {
     let rest = taffy
         .new_leaf(Style {
             flex_grow: 1.0,
-            flex_basis: percent(0.0),
+            flex_basis: percent(0.0_f32),
             min_size: Size {
                 width: auto(),
-                height: length(0.0),
+                height: length(0.0_f32),
             },
             ..Default::default()
         })
@@ -93,8 +93,8 @@ fn taffy_flex_grow_with_percent_basis() {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Column,
                 size: Size {
-                    width: length(1200.0),
-                    height: length(800.0),
+                    width: length(1200.0_f32),
+                    height: length(800.0_f32),
                 },
                 ..Default::default()
             },
@@ -106,8 +106,8 @@ fn taffy_flex_grow_with_percent_basis() {
         .compute_layout(
             container,
             Size {
-                width: length(1200.0),
-                height: length(800.0),
+                width: length(1200.0_f32),
+                height: length(800.0_f32),
             },
         )
         .unwrap();
@@ -128,7 +128,7 @@ fn taffy_flex_row_stretch() {
     let only = taffy
         .new_leaf(Style {
             size: Size {
-                width: length(300.0),
+                width: length(300.0_f32),
                 height: auto(),
             },
             ..Default::default()
@@ -140,8 +140,8 @@ fn taffy_flex_row_stretch() {
                 display: Display::Flex,
                 flex_direction: FlexDirection::Row,
                 size: Size {
-                    width: length(1200.0),
-                    height: length(800.0),
+                    width: length(1200.0_f32),
+                    height: length(800.0_f32),
                 },
                 ..Default::default()
             },
@@ -153,8 +153,8 @@ fn taffy_flex_row_stretch() {
         .compute_layout(
             container,
             Size {
-                width: length(1200.0),
-                height: length(800.0),
+                width: length(1200.0_f32),
+                height: length(800.0_f32),
             },
         )
         .unwrap();
