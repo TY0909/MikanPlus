@@ -169,7 +169,9 @@ jobs:
             --desktop-file AppDir/mikanplus.desktop \
             --icon-file AppDir/mikanplus.png \
             --output appimage
-          mv MikanPlus-x86_64.AppImage "MikanPlus-$VERSION-linux-x86_64.AppImage"
+          # appimagetool 的输出名随版本变化(新版会带版本号),用通配符统一改名
+          rm -f "MikanPlus-$VERSION-linux-x86_64.AppImage"
+          mv MikanPlus-*-x86_64.AppImage "MikanPlus-$VERSION-linux-x86_64.AppImage"
 
       - name: Upload to GitHub Release
         shell: bash
