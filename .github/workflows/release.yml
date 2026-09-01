@@ -1,0 +1,159 @@
+# 打 tag(v*)后自动构建 Windows / macOS / Linux 三平台安装包并发布 GitHub Release
+#
+# 用法:
+#   git tag v0.1.0 && git push origin v0.1.0
+#
+# 产物:
+#   - Windows: zip 便携版 + NSIS 安装包 (.exe)
+#   - macOS:   通用二进制(Intel + Apple Silicon).dmg
+#   - Linux:   tar.gz 便携版 + .deb 安装包
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows:
+    name: Windows (x86_64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version from tag
+        shell: pwsh
+        run: |
+          $v = $env:GITHUB_REF_NAME -replace '^v', ''
+          "VERSION=$v" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package portable zip
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path staging/MikanPlus
+          Copy-Item target/release/MikanPlus.exe staging/MikanPlus/
+          Copy-Item assets staging/MikanPlus/assets -Recurse
+          Compress-Archive -Path staging/MikanPlus -DestinationPath "MikanPlus-$env:VERSION-windows-x86_64.zip"
+
+      - name: Build NSIS installer
+        shell: pwsh
+        run: |
+          choco install nsis -y --no-progress
+          New-Item -ItemType Directory -Force -Path packaging/windows/staging
+          Copy-Item target/release/MikanPlus.exe packaging/windows/staging/
+          Copy-Item assets packaging/windows/staging/assets -Recurse
+          Copy-Item assets/mikan_icon.ico packaging/windows/staging/
+          Push-Location packaging/windows
+          makensis /DVERSION=$env:VERSION installer.nsi
+          Pop-Location
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            MikanPlus-${{ env.VERSION }}-windows-x86_64.zip
+            packaging/windows/MikanPlus-${{ env.VERSION }}-windows-x86_64-setup.exe
+
+  macos:
+    name: macOS (Apple Silicon)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version from tag
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary (arm64)
+        run: cargo build --release --locked --target aarch64-apple-darwin
+
+      - name: Build .app bundle and .dmg
+        run: VERSION="$VERSION" bash packaging/macos/bundle.sh
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: MikanPlus-${{ env.VERSION }}-macos-arm64.dmg
+
+  linux:
+    name: Linux (x86_64)
+    # ubuntu-22.04:glibc 2.35,覆盖 Ubuntu 22.04+/Debian 12+ 等发行版
+    # (用 24.04 编译会要求用户 glibc >= 2.39,兼容面更窄)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set version from tag
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          echo "VERSION=$v" >> "$GITHUB_ENV"
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build release binary
+        run: cargo build --release --locked
+
+      - name: Package portable tar.gz
+        run: |
+          mkdir -p staging/MikanPlus-${{ env.VERSION }}-linux-x86_64
+          cp target/release/MikanPlus staging/MikanPlus-${{ env.VERSION }}-linux-x86_64/
+          cp -r assets staging/MikanPlus-${{ env.VERSION }}-linux-x86_64/
+          tar -C staging -czf MikanPlus-${{ env.VERSION }}-linux-x86_64.tar.gz \
+            MikanPlus-${{ env.VERSION }}-linux-x86_64
+
+      - name: Build .deb package
+        # imagemagick: 生成 256x256 桌面图标
+        run: |
+          sudo apt-get update -q && sudo apt-get install -y -q imagemagick
+          VERSION="$VERSION" bash packaging/linux/build-deb.sh
+
+      - name: Build AppImage
+        # 单文件,捆绑除 glibc / GPU 驱动外的全部动态库,用户只需 chmod +x 即可运行
+        run: |
+          set -euo pipefail
+          sudo apt-get update && sudo apt-get install -y patchelf imagemagick
+          wget -q https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage
+          chmod +x linuxdeploy-x86_64.AppImage
+          mkdir -p AppDir
+          cp packaging/linux/mikanplus.desktop AppDir/
+          # linuxdeploy 只接受标准尺寸图标(如 512x512),mikan-pic.png 为 400x400
+          magick assets/mikan-pic.png -resize 512x512 AppDir/mikanplus.png
+          # linuxdeploy 默认不捆绑 libxcb(避免 X11 ABI 冲突),手动补上,
+          # 使最终产物除 glibc/GPU 驱动外不再依赖宿主任何库
+          LIBXCB=$(ldd target/release/MikanPlus | awk '/libxcb\.so\.1/ {print $3}')
+          mkdir -p AppDir/usr/lib
+          cp "$LIBXCB" AppDir/usr/lib/
+          ./linuxdeploy-x86_64.AppImage --appimage-extract-and-run \
+            --appdir AppDir \
+            --executable target/release/MikanPlus \
+            --desktop-file AppDir/mikanplus.desktop \
+            --icon-file AppDir/mikanplus.png \
+            --output appimage
+          mv MikanPlus-x86_64.AppImage "MikanPlus-$VERSION-linux-x86_64.AppImage"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            MikanPlus-${{ env.VERSION }}-linux-x86_64.tar.gz
+            mikanplus_${{ env.VERSION }}_amd64.deb
+            MikanPlus-${{ env.VERSION }}-linux-x86_64.AppImage

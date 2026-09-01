@@ -155,7 +155,7 @@ impl Render for Toolbar {
                     let on_navigate = on_navigate.clone();
                     move |_, window, app| on_navigate(TopSection::Home, window, app)
                 })
-                .child(gpui::img(std::path::PathBuf::from("assets/mikan_icon.png")).size(px(32.)))
+                .child(gpui::img(std::path::PathBuf::from("assets/mikan-pic.png")).size(px(32.)))
                 .into_any_element()
         } else {
             gpui::div()

@@ -3,7 +3,6 @@ name = "mikan_plus"
 version = "0.1.0"
 edition = "2024"
 
-# 二进制名(PascalCase):macOS 菜单栏/Dock 显示的应用名
 [[bin]]
 name = "MikanPlus"
 path = "src/main.rs"
@@ -26,3 +25,7 @@ ureq = { version = "2", features = ["charset", "json"] }
 gpui = { version = "0.2.2", features = ["test-support"] }
 taffy = "0.9"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[build-dependencies]
+# 仅 Windows 构建时嵌入 exe 图标(见 build.rs)
+winres = "0.1"

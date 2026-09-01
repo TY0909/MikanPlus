@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=MikanPlus
+Comment=A desktop anime tracker built with GPUI
+Comment[zh_CN]=基于 GPUI 的桌面追番应用
+# AppImage 用相对名;deb 构建时由 build-deb.sh 替换为绝对路径
+Exec=MikanPlus
+Icon=mikanplus
+Terminal=false
+Categories=AudioVideo;Video;Network;

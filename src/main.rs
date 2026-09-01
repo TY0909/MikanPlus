@@ -1735,10 +1735,31 @@ fn open_main_window(cx: &mut App) {
     .ok();
 }
 
+/// 解析资源目录(assets/),不依赖启动时的工作目录:
+/// - macOS .app 包:`Contents/MacOS/../Resources/assets`
+/// - Linux 安装版/Windows 便携版:可执行文件同级的 `assets/`
+/// - 开发场景回退:当前目录 `assets`(cargo run)
+fn asset_base() -> PathBuf {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        #[cfg(target_os = "macos")]
+        {
+            let resources = dir.join("../Resources").join("assets");
+            if resources.is_dir() {
+                return resources;
+            }
+        }
+        let beside_exe = dir.join("assets");
+        if beside_exe.is_dir() {
+            return beside_exe;
+        }
+    }
+    PathBuf::from("assets")
+}
+
 fn main() {
-    let app = Application::new().with_assets(Assets {
-        base: PathBuf::from("assets"),
-    });
+    let app = Application::new().with_assets(Assets { base: asset_base() });
 
     // macOS 惯例:⌘W 关闭最后窗口后应用仍驻留 Dock;
     // 点击 Dock 图标时重建窗口(下载任务在后台继续)
