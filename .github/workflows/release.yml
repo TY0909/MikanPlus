@@ -156,7 +156,8 @@ jobs:
           mkdir -p AppDir
           cp packaging/linux/mikanplus.desktop AppDir/
           # linuxdeploy 只接受标准尺寸图标(如 512x512),mikan-pic.png 为 400x400
-          magick assets/mikan-pic.png -resize 512x512 AppDir/mikanplus.png
+          # (用 convert:Ubuntu 22.04 的 imagemagick 6.x 没有 magick 命令)
+          convert assets/mikan-pic.png -resize 512x512 AppDir/mikanplus.png
           # linuxdeploy 默认不捆绑 libxcb(避免 X11 ABI 冲突),手动补上,
           # 使最终产物除 glibc/GPU 驱动外不再依赖宿主任何库
           LIBXCB=$(ldd target/release/MikanPlus | awk '/libxcb\.so\.1/ {print $3}')

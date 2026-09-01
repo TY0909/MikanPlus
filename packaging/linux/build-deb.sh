@@ -22,8 +22,9 @@ cp target/release/MikanPlus "$STAGE/$LIBDIR/"
 cp -R assets "$STAGE/$LIBDIR/assets"
 
 # 图标(mikan-pic.png → 标准 256x256 尺寸;需要 ImageMagick,CI 中已安装)
+# 注意:Ubuntu 22.04 的 imagemagick 是 6.x,只有 convert 命令(magick 是 7.x)
 mkdir -p "$STAGE/usr/share/icons/hicolor/256x256/apps"
-magick assets/mikan-pic.png -resize 256x256 "$STAGE/usr/share/icons/hicolor/256x256/apps/mikanplus.png"
+convert assets/mikan-pic.png -resize 256x256 "$STAGE/usr/share/icons/hicolor/256x256/apps/mikanplus.png"
 
 # .desktop 入口(与 AppImage 共用一份源文件,deb 安装到系统后用绝对路径)
 sed 's|^Exec=.*|Exec=/usr/lib/mikanplus/MikanPlus|' \
