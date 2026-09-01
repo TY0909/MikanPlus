@@ -5,8 +5,8 @@
 #
 # 产物:
 #   - Windows: zip 便携版 + NSIS 安装包 (.exe)
-#   - macOS:   通用二进制(Intel + Apple Silicon).dmg
-#   - Linux:   tar.gz 便携版 + .deb 安装包
+#   - macOS:   Apple Silicon (M 系列) .dmg
+#   - Linux:   tar.gz 便携版 + .deb + AppImage
 name: Release
 
 on:
@@ -25,7 +25,7 @@ jobs:
     name: Windows (x86_64)
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set version from tag
         shell: pwsh
@@ -55,22 +55,31 @@ jobs:
           Copy-Item target/release/MikanPlus.exe packaging/windows/staging/
           Copy-Item assets packaging/windows/staging/assets -Recurse
           Copy-Item assets/mikan_icon.ico packaging/windows/staging/
+          # choco 安装的 NSIS 不会把安装目录加进当前会话 PATH,手动追加
+          $env:Path += ";C:\Program Files (x86)\NSIS"
           Push-Location packaging/windows
           makensis /DVERSION=$env:VERSION installer.nsi
           Pop-Location
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            MikanPlus-${{ env.VERSION }}-windows-x86_64.zip
-            packaging/windows/MikanPlus-${{ env.VERSION }}-windows-x86_64-setup.exe
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            MikanPlus-${{ env.VERSION }}-windows-x86_64.zip \
+            packaging/windows/MikanPlus-${{ env.VERSION }}-windows-x86_64-setup.exe \
+            --generate-notes 2>/dev/null \
+            || gh release upload "$GITHUB_REF_NAME" \
+              MikanPlus-${{ env.VERSION }}-windows-x86_64.zip \
+              packaging/windows/MikanPlus-${{ env.VERSION }}-windows-x86_64-setup.exe \
+              --clobber
 
   macos:
     name: macOS (Apple Silicon)
     runs-on: macos-14
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set version from tag
         run: |
@@ -89,9 +98,16 @@ jobs:
         run: VERSION="$VERSION" bash packaging/macos/bundle.sh
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: MikanPlus-${{ env.VERSION }}-macos-arm64.dmg
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            MikanPlus-${{ env.VERSION }}-macos-arm64.dmg \
+            --generate-notes 2>/dev/null \
+            || gh release upload "$GITHUB_REF_NAME" \
+              MikanPlus-${{ env.VERSION }}-macos-arm64.dmg \
+              --clobber
 
   linux:
     name: Linux (x86_64)
@@ -99,12 +115,16 @@ jobs:
     # (用 24.04 编译会要求用户 glibc >= 2.39,兼容面更窄)
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Set version from tag
         run: |
           v="${GITHUB_REF_NAME#v}"
           echo "VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: Install system dependencies
+        # gpui 链接需要 xkbcommon 的开发库(本地编译有的,runner 上没有)
+        run: sudo apt-get update -q && sudo apt-get install -y -q libxkbcommon-dev libxkbcommon-x11-dev
 
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
@@ -151,9 +171,17 @@ jobs:
           mv MikanPlus-x86_64.AppImage "MikanPlus-$VERSION-linux-x86_64.AppImage"
 
       - name: Upload to GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: |
-            MikanPlus-${{ env.VERSION }}-linux-x86_64.tar.gz
-            mikanplus_${{ env.VERSION }}_amd64.deb
-            MikanPlus-${{ env.VERSION }}-linux-x86_64.AppImage
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            MikanPlus-${{ env.VERSION }}-linux-x86_64.tar.gz \
+            mikanplus_${{ env.VERSION }}_amd64.deb \
+            MikanPlus-${{ env.VERSION }}-linux-x86_64.AppImage \
+            --generate-notes 2>/dev/null \
+            || gh release upload "$GITHUB_REF_NAME" \
+              MikanPlus-${{ env.VERSION }}-linux-x86_64.tar.gz \
+              mikanplus_${{ env.VERSION }}_amd64.deb \
+              MikanPlus-${{ env.VERSION }}-linux-x86_64.AppImage \
+              --clobber
