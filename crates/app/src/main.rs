@@ -1,3 +1,10 @@
+// Windows 发布版走 GUI 子系统:双击启动时不再弹出终端窗口。
+// debug 构建保留控制台,便于开发时查看日志。
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
+
 mod menu;
 
 use std::borrow::Cow;
