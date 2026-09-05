@@ -521,7 +521,8 @@ impl Render for SettingsPage {
                         "关于",
                         "MikanPlus 的相关信息",
                         vec![
-                            about_row("版本", "0.1.0", "info", None, None).into_any_element(),
+                            about_row("版本", env!("CARGO_PKG_VERSION"), "info", None, None)
+                                .into_any_element(),
                             about_row(
                                 "番剧数据",
                                 "蜜柑计划 (mikanani.me)",
