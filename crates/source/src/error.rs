@@ -11,9 +11,12 @@ pub enum SourceError {
     /// 请求过于频繁(处于退避期内)
     #[error("请求过于频繁")]
     Throttled,
-    /// 无法建立网络连接(连接被拒、超时、DNS 失败等)
+    /// 无法建立网络连接(连接被拒、DNS 失败等)
     #[error("无法连接到服务器")]
     Network,
+    /// 已建立连接但响应体读取中断(下载超时、连接被重置)
+    #[error("加载中断")]
+    Interrupted,
     /// 服务器返回错误状态码(4xx / 5xx)
     #[error("服务器返回错误状态码 {0}")]
     Server(u16),
@@ -34,6 +37,7 @@ impl SourceError {
         match self {
             SourceError::Throttled => "请求过于频繁",
             SourceError::Network => "无法连接到服务器",
+            SourceError::Interrupted => "加载中断",
             SourceError::Server(_) => "源站返回了错误",
             SourceError::Decode => "无法解析返回的内容",
             SourceError::ImageTooLarge => "图片过大",
@@ -46,8 +50,9 @@ impl SourceError {
         match self {
             SourceError::Throttled => "请稍后重试",
             SourceError::Network => "请检查网络连接或代理设置",
+            SourceError::Interrupted => "源站响应缓慢或网络连接不稳定，请稍后重试",
             SourceError::Server(_) => "蜜柑计划可能暂时异常，请稍后重试",
-            SourceError::Decode => "源站页面可能已变更，请稍后重试",
+            SourceError::Decode => "源站返回了无法识别的内容，请稍后重试",
             SourceError::ImageTooLarge => "",
             SourceError::Cache => "请检查磁盘空间与写入权限",
         }

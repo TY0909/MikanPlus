@@ -314,6 +314,27 @@ fn map_ureq_error(e: ureq::Error) -> SourceError {
     }
 }
 
+/// 读取并解码响应体为 UTF-8 字符串。
+///
+/// 区分两类失败:读取出错(超时 / 连接中断)属于传输层,归类为
+/// [`Interrupted`](SourceError::Interrupted);只有响应体字节本身非法
+/// (或超出上限)才归类为 [`Decode`](SourceError::Decode)。
+fn read_html_body(response: ureq::Response) -> Result<String, SourceError> {
+    // 蜜柑搜索结果页一次返回全部匹配剧集,体积可达数 MB,上限放宽到 32MB
+    const MAX_HTML_BYTES: usize = 32 * 1024 * 1024;
+    let mut buf: Vec<u8> = Vec::new();
+    response
+        .into_reader()
+        .take((MAX_HTML_BYTES + 1) as u64)
+        .read_to_end(&mut buf)
+        .map_err(|_| SourceError::Interrupted)?;
+    if buf.len() > MAX_HTML_BYTES {
+        return Err(SourceError::Decode);
+    }
+    // 源站页面为 UTF-8;仅在字节本身非法时才按解码失败处理
+    String::from_utf8(buf).map_err(|_| SourceError::Decode)
+}
+
 /// 抓取 HTML 页面(带节流/退避/并发控制)。退避期内返回 Err。
 pub fn fetch_html(url: &str) -> Result<String, SourceError> {
     if in_backoff(url) {
@@ -324,7 +345,7 @@ pub fn fetch_html(url: &str) -> Result<String, SourceError> {
         .get(url)
         .call()
         .map_err(map_ureq_error)
-        .and_then(|r| r.into_string().map_err(|_| SourceError::Decode));
+        .and_then(read_html_body);
     release_slot();
     match result {
         Ok(text) => {
@@ -357,7 +378,7 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, SourceError> {
             r.into_reader()
                 .take((MAX_IMAGE_BYTES + 1) as u64)
                 .read_to_end(&mut buf)
-                .map_err(|_| SourceError::Decode)?;
+                .map_err(|_| SourceError::Interrupted)?;
             if buf.len() > MAX_IMAGE_BYTES {
                 return Err(SourceError::ImageTooLarge);
             }
