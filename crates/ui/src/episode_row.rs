@@ -278,6 +278,8 @@ pub fn action_button(
         }
         Some(TaskState::Error(err)) => {
             let task = task.unwrap();
+            // 只展示用户能理解的错误,不暴露底层细节
+            let message = err.user_message().to_string();
             gpui_kit::div()
                 .flex()
                 .items_center()
@@ -288,7 +290,7 @@ pub fn action_button(
                         .text_color(theme.danger)
                         .max_w(px(220.))
                         .truncate()
-                        .child(err.clone()),
+                        .child(message),
                 )
                 .child(cancel(task.id.clone()))
                 .into_any_element()

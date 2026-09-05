@@ -3,7 +3,7 @@
 //! 目录结构(见 paths.rs):
 //! ```text
 //! <cache_dir>/
-//! ├── images/<url-sha256>        # 封面图片,永久缓存,总量上限 512MB(LRU)
+//! ├── images/<资源键-sha256>   # 封面图片,永久缓存,总量上限 512MB(LRU)
 //! ├── list.json                  # 列表页(30 分钟 TTL)
 //! ├── detail/<id>.json           # 详情页(24 小时 TTL)
 //! └── search/<q-hash>.json       # 搜索(10 分钟 TTL)
@@ -37,6 +37,21 @@ fn url_hash(url: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(url.as_bytes());
     format!("{:x}", hasher.finalize())
+}
+
+/// 图片资源缓存键:与来源主机无关。
+///
+/// 同一路径在 mikanani.me 与备用域名 mikanime.tv 下是同一份资源,
+/// 切换数据源域名不应导致重新下载或产生重复缓存。键由「路径 + 查询串」决定
+/// (查询串会改变服务器返回的内容,如尺寸裁剪,因此保留)。
+fn image_key(url: &str) -> String {
+    let path = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .and_then(|rest| rest.split_once('/'))
+        .map(|(_, path)| format!("/{path}"))
+        .unwrap_or_else(|| url.to_string());
+    url_hash(&path)
 }
 
 fn fresh(path: &Path, ttl: Duration) -> bool {
@@ -131,7 +146,7 @@ fn filetime_touch(path: &Path) -> std::io::Result<()> {
 fn image_path(url: &str) -> PathBuf {
     crate::paths::app_cache_dir()
         .join("images")
-        .join(url_hash(url))
+        .join(image_key(url))
 }
 
 /// 保存图片到缓存(原子:临时文件 + rename,杜绝半截文件被命中)
@@ -212,6 +227,31 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 64);
+    }
+
+    #[test]
+    fn image_key_is_host_independent() {
+        // 同一路径在不同数据源域名下共享同一缓存键
+        assert_eq!(
+            image_key("https://mikanani.me/images/a.jpg?width=400&height=560"),
+            image_key("https://mikanime.tv/images/a.jpg?width=400&height=560"),
+        );
+        assert_eq!(
+            image_key("https://mikanani.me/images/a.jpg"),
+            image_key("https://mikanime.tv/images/a.jpg"),
+        );
+        // 查询串影响返回内容,应区分(尺寸裁剪)
+        assert_ne!(
+            image_key("https://mikanani.me/images/a.jpg?width=400&height=400"),
+            image_key("https://mikanani.me/images/a.jpg?width=400&height=560"),
+        );
+        // 不同路径区分
+        assert_ne!(
+            image_key("https://mikanani.me/images/a.jpg"),
+            image_key("https://mikanani.me/images/b.jpg"),
+        );
+        // 相对路径 / 无主机 URL 原样参与哈希
+        assert_eq!(image_key("/images/a.jpg"), image_key("/images/a.jpg"),);
     }
 
     #[test]

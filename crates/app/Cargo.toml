@@ -10,7 +10,6 @@ name = "MikanPlus"
 path = "src/main.rs"
 
 [dependencies]
-anyhow.workspace = true
 gpui-kit.workspace = true
 domain = { path = "../domain" }
 downloader = { path = "../downloader" }
