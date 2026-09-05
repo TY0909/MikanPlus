@@ -8,7 +8,6 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
-use anyhow::Result;
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::StyledExt;
 use gpui_kit::component::WindowExt;
@@ -22,6 +21,7 @@ use domain::navigation::{HomeFilter, Page, TopSection};
 use domain::{BangumiGroup, BangumiItem, SearchResults, Subscription};
 use downloader::{DownloadCmd, DownloadManager};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use source::SourceError;
 use storage::{
     load_subgroup_keywords, load_subscriptions, save_subgroup_keywords, save_subscriptions,
 };
@@ -84,24 +84,25 @@ enum ListState {
     Idle,
     Loading,
     Ready,
-    Error(String),
+    Error(SourceError),
 }
 
 /// 后台加载结果(由独立线程写入,主线程轮询消费)
-static LIST_RESULT: Mutex<Option<Result<Vec<BangumiGroup>, String>>> = Mutex::new(None);
+static LIST_RESULT: Mutex<Option<Result<Vec<BangumiGroup>, SourceError>>> = Mutex::new(None);
 /// 详情加载结果:bid → 结果(使用 OnceLock 惰性初始化)
-static DETAIL_RESULT: OnceLock<Mutex<HashMap<u32, Result<BangumiItem, String>>>> = OnceLock::new();
+static DETAIL_RESULT: OnceLock<Mutex<HashMap<u32, Result<BangumiItem, SourceError>>>> =
+    OnceLock::new();
 /// 搜索加载结果:query → 结果
-static SEARCH_RESULT: OnceLock<Mutex<HashMap<String, Result<SearchResults, String>>>> =
+static SEARCH_RESULT: OnceLock<Mutex<HashMap<String, Result<SearchResults, SourceError>>>> =
     OnceLock::new();
 /// 后台加载完成信号:任何加载完成时递增,供轮询循环刷新 UI
 static LOAD_VERSION: AtomicU64 = AtomicU64::new(0);
 
-fn detail_result() -> &'static Mutex<HashMap<u32, Result<BangumiItem, String>>> {
+fn detail_result() -> &'static Mutex<HashMap<u32, Result<BangumiItem, SourceError>>> {
     DETAIL_RESULT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn search_result() -> &'static Mutex<HashMap<String, Result<SearchResults, String>>> {
+fn search_result() -> &'static Mutex<HashMap<String, Result<SearchResults, SourceError>>> {
     SEARCH_RESULT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -118,7 +119,7 @@ struct MikanPlus {
     /// 详情加载中:name
     detail_loading: HashSet<String>,
     /// 详情加载失败:name → 错误
-    detail_error: HashMap<String, String>,
+    detail_error: HashMap<String, SourceError>,
     /// 详情加载的 bid → name 映射(消费结果时不再依赖列表查找)
     detail_names: HashMap<u32, String>,
     /// 在线搜索结果:query → 结果(番剧卡片 + 剧集列表)
@@ -128,7 +129,7 @@ struct MikanPlus {
     /// 搜索加载中:query
     search_loading: HashSet<String>,
     /// 搜索失败:query → 错误
-    search_error: HashMap<String, String>,
+    search_error: HashMap<String, SourceError>,
     /// 搜索结果分页页码:query → 页码(0 起,切换页面后保留)
     search_page: HashMap<String, usize>,
     subscriptions: Vec<Subscription>,
@@ -234,7 +235,9 @@ impl MikanPlus {
                                                                 window.push_notification(
                                                                     gpui_kit::component::notification::Notification::error(
                                                                         format!(
-                                                                            "「{title}」下载失败: {error}"
+                                                                            "「{title}」下载失败:{} —— {}",
+                                                                            error.user_message(),
+                                                                            error.user_hint()
                                                                         ),
                                                                     ),
                                                                     cx,
@@ -250,7 +253,11 @@ impl MikanPlus {
                                                             |_, window, cx| {
                                                                 window.push_notification(
                                                                     gpui_kit::component::notification::Notification::error(
-                                                                        format!("下载引擎不可用: {error}"),
+                                                                        format!(
+                                                                            "{} —— {}",
+                                                                            error.user_message(),
+                                                                            error.user_hint()
+                                                                        ),
                                                                     ),
                                                                     cx,
                                                                 );
@@ -592,7 +599,7 @@ impl MikanPlus {
 
     /// 消费后台线程完成的详情加载结果(render 时调用,幂等)
     fn consume_detail_results(&mut self) {
-        let finished: Vec<(u32, Result<BangumiItem, String>)> =
+        let finished: Vec<(u32, Result<BangumiItem, SourceError>)> =
             detail_result().lock().unwrap().drain().collect();
         if finished.is_empty() {
             return;
@@ -686,7 +693,7 @@ impl MikanPlus {
 
     /// 消费后台线程完成的搜索结果(render 时调用,幂等)
     fn consume_search_results(&mut self) {
-        let finished: Vec<(String, Result<SearchResults, String>)> =
+        let finished: Vec<(String, Result<SearchResults, SourceError>)> =
             search_result().lock().unwrap().drain().collect();
         for (query, result) in finished {
             self.search_loading.remove(&query);
@@ -1687,11 +1694,13 @@ fn loading_view(theme: &gpui_kit::component::theme::Theme) -> gpui_kit::Div {
 
 /// 加载失败视图:错误信息 + 重试按钮
 fn error_view(
-    msg: &str,
+    err: &SourceError,
     retry: GoBackCallback,
     theme: &gpui_kit::component::theme::Theme,
 ) -> gpui_kit::Div {
-    let msg = msg.to_string();
+    // 只展示用户能理解的信息,不暴露底层错误细节
+    let message = err.user_message().to_string();
+    let hint = err.user_hint().to_string();
     gpui_kit::div()
         .size_full()
         .flex()
@@ -1704,8 +1713,16 @@ fn error_view(
             gpui_kit::div()
                 .text_sm()
                 .text_color(theme.danger)
-                .child(format!("加载失败: {msg}")),
+                .child(message),
         )
+        .when(!hint.is_empty(), |this| {
+            this.child(
+                gpui_kit::div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(hint),
+            )
+        })
         .child(
             gpui_kit::div()
                 .px(px(14.))
@@ -1800,17 +1817,18 @@ struct Assets {
 }
 
 impl AssetSource for Assets {
-    fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>> {
+    fn load(&self, path: &str) -> gpui_kit::Result<Option<Cow<'static, [u8]>>> {
         match fs::read(self.base.join(path)) {
             Ok(data) => Ok(Some(Cow::Owned(data))),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
                 gpui_kit::assets::Assets.load(path)
             }
-            Err(error) => Err(anyhow::anyhow!("加载资源失败 {path}: {error}")),
+            // io::Error → anyhow::Error(gpui::Result 底层类型)由 From 自动转换
+            Err(error) => Err(error.into()),
         }
     }
 
-    fn list(&self, path: &str) -> Result<Vec<SharedString>> {
+    fn list(&self, path: &str) -> gpui_kit::Result<Vec<SharedString>> {
         let mut assets = gpui_kit::assets::Assets.list(path)?;
         match fs::read_dir(self.base.join(path)) {
             Ok(entries) => assets.extend(
@@ -1823,7 +1841,7 @@ impl AssetSource for Assets {
                     .map(SharedString::from),
             ),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => return Err(anyhow::anyhow!("列举资源失败 {path}: {error}")),
+            Err(error) => return Err(error.into()),
         }
         assets.sort_unstable();
         assets.dedup();

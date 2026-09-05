@@ -19,12 +19,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use anyhow::Result;
 use librqbit::{
     AddTorrent, AddTorrentOptions, AddTorrentResponse, Session, SessionOptions,
     SessionPersistenceConfig, TorrentStatsState,
 };
 use serde::{Deserialize, Serialize};
+use thiserror::Error;
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 use storage::paths;
@@ -66,6 +66,55 @@ pub const TRACKERS: &[&str] = &[
 /// magnet 添加(metadata 获取)超时
 const METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// 下载相关错误。区分类型以便 UI 给出针对性提示,不暴露底层细节。
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum DownloadError {
+    /// 下载后台已退出(命令通道断开)
+    #[error("下载引擎不可用")]
+    EngineUnavailable,
+    /// 下载引擎启动失败
+    #[error("下载引擎启动失败")]
+    EngineInit,
+    /// 磁力链接解析失败
+    #[error("磁力链接解析失败")]
+    MagnetParse,
+    /// 添加下载任务失败
+    #[error("添加下载任务失败")]
+    AddFailed,
+    /// 获取资源信息超时
+    #[error("获取资源信息超时")]
+    MetadataTimeout,
+    /// 下载过程出错(librqbit 上报)
+    #[error("下载出错")]
+    Torrent,
+}
+
+impl DownloadError {
+    /// 面向用户的简要说明(不含技术细节)
+    pub fn user_message(&self) -> &'static str {
+        match self {
+            DownloadError::EngineUnavailable => "下载功能不可用",
+            DownloadError::EngineInit => "下载引擎启动失败",
+            DownloadError::MagnetParse => "磁力链接无效",
+            DownloadError::AddFailed => "添加下载任务失败",
+            DownloadError::MetadataTimeout => "获取资源信息超时",
+            DownloadError::Torrent => "下载出错",
+        }
+    }
+
+    /// 用户需要检查 / 采取的下一步
+    pub fn user_hint(&self) -> &'static str {
+        match self {
+            DownloadError::EngineUnavailable => "请重启应用",
+            DownloadError::EngineInit => "请重启应用",
+            DownloadError::MagnetParse => "该资源的磁力链接可能无效",
+            DownloadError::AddFailed => "该资源可能暂无可用来源，请稍后重试",
+            DownloadError::MetadataTimeout => "该资源可能暂无可用来源，请稍后重试",
+            DownloadError::Torrent => "请取消后重新下载",
+        }
+    }
+}
+
 /// UI 可见的任务状态
 #[derive(Debug, Clone, PartialEq)]
 pub enum TaskState {
@@ -78,7 +127,7 @@ pub enum TaskState {
     /// 任务已完成但落盘文件被外部删除(UI 回到「下载」态)
     Missing,
     /// 出错(无自动重试,等待用户操作)
-    Error(String),
+    Error(DownloadError),
 }
 
 /// 任务快照(UI 轮询读取)
@@ -182,9 +231,9 @@ pub fn snapshot_version() -> u64 {
 #[derive(Debug, Clone)]
 pub enum DownloadEvent {
     /// 添加任务失败(metadata 获取失败/超时等)
-    AddFailed { title: String, error: String },
+    AddFailed { title: String, error: DownloadError },
     /// 下载引擎启动失败(后台线程退出,所有下载功能不可用)
-    EngineFailed { error: String },
+    EngineFailed { error: DownloadError },
     /// 退订目录清理被阻断:该目录仍有进行中的任务
     UnsubscribeBlocked { dir: PathBuf, titles: Vec<String> },
     /// 退订目录清理完成(目录已删除,UI 可移除订阅记录)
@@ -230,10 +279,10 @@ impl DownloadManager {
     }
 
     /// 发送命令(线程安全,不阻塞)。接收端退出时返回 Err。
-    pub fn send(&self, cmd: DownloadCmd) -> Result<(), String> {
+    pub fn send(&self, cmd: DownloadCmd) -> Result<(), DownloadError> {
         self.cmd_tx
             .send(cmd)
-            .map_err(|e| format!("下载引擎不可用: {e}"))
+            .map_err(|_| DownloadError::EngineUnavailable)
     }
 
     /// 读取任务快照(UI 轮询)
@@ -264,7 +313,9 @@ async fn run_loop(
             let msg = format!("下载引擎启动失败: {e:#}");
             eprintln!("{msg}");
             // 通知 UI:下载功能不可用(否则所有下载点击都会静默失效)
-            push_event(DownloadEvent::EngineFailed { error: msg });
+            push_event(DownloadEvent::EngineFailed {
+                error: DownloadError::EngineInit,
+            });
             return;
         }
     };
@@ -316,11 +367,10 @@ async fn handle_cmd(session: &Arc<Session>, meta_dir: &Path, cmd: DownloadCmd) {
             let mut m = match librqbit::Magnet::parse(&magnet) {
                 Ok(m) => m,
                 Err(e) => {
-                    let msg = format!("磁力解析失败: {e}");
-                    eprintln!("{msg}");
+                    eprintln!("磁力解析失败: {e}");
                     push_event(DownloadEvent::AddFailed {
                         title: title.clone(),
-                        error: msg,
+                        error: DownloadError::MagnetParse,
                     });
                     return;
                 }
@@ -366,11 +416,10 @@ async fn handle_cmd(session: &Arc<Session>, meta_dir: &Path, cmd: DownloadCmd) {
                     if let Some(hash) = &hash {
                         pending_remove(hash);
                     }
-                    let msg = format!("添加任务失败: {e:#}");
-                    eprintln!("{msg}");
+                    eprintln!("添加任务失败: {e:#}");
                     push_event(DownloadEvent::AddFailed {
                         title: title.clone(),
-                        error: msg,
+                        error: DownloadError::AddFailed,
                     });
                     return;
                 }
@@ -378,12 +427,10 @@ async fn handle_cmd(session: &Arc<Session>, meta_dir: &Path, cmd: DownloadCmd) {
                     if let Some(hash) = &hash {
                         pending_remove(hash);
                     }
-                    let msg =
-                        format!("获取资源信息超时({METADATA_TIMEOUT:?}),该资源可能暂无可用来源");
-                    eprintln!("{msg}");
+                    eprintln!("获取资源信息超时({METADATA_TIMEOUT:?}),该资源可能暂无可用来源");
                     push_event(DownloadEvent::AddFailed {
                         title: title.clone(),
-                        error: msg,
+                        error: DownloadError::MetadataTimeout,
                     });
                     return;
                 }
@@ -549,7 +596,10 @@ async fn handle_cmd(session: &Arc<Session>, meta_dir: &Path, cmd: DownloadCmd) {
 
 /// 创建 session:DHT 初始化失败(如端口被占用,常见于双开)时
 /// 降级为禁用 DHT 重试一次,保证 tracker 下载路径可用。
-async fn create_session(persist_dir: &Path, dht_file: &Path) -> anyhow::Result<Arc<Session>> {
+async fn create_session(
+    persist_dir: &Path,
+    dht_file: &Path,
+) -> Result<Arc<Session>, DownloadError> {
     use librqbit::dht::DhtPersistenceConfig;
     use librqbit::{DhtSessionConfig, ListenerMode, ListenerOptions};
     use std::net::Ipv4Addr;
@@ -583,7 +633,10 @@ async fn create_session(persist_dir: &Path, dht_file: &Path) -> anyhow::Result<A
             eprintln!("下载引擎初始化失败,尝试禁用 DHT 降级: {e:#}");
             Session::new_with_opts(paths::video_dir(), make_opts(true))
                 .await
-                .map_err(|e2| anyhow::anyhow!("{e2:#}(降级后仍失败)"))
+                .map_err(|e2| {
+                    eprintln!("下载引擎降级后仍失败: {e2:#}");
+                    DownloadError::EngineInit
+                })
         }
     }
 }
@@ -689,10 +742,13 @@ fn update_snapshot(session: &Arc<Session>, meta_dir: &Path, snapshot: &Arc<Mutex
                 }
                 TorrentStatsState::Live => (TaskState::Downloading, None),
                 TorrentStatsState::Paused => (TaskState::Downloading, None),
-                TorrentStatsState::Error => (
-                    TaskState::Error(stats.error.clone().unwrap_or_else(|| "未知错误".into())),
-                    None,
-                ),
+                TorrentStatsState::Error => {
+                    // 底层错误细节只进日志,UI 只展示「下载出错」
+                    if let Some(e) = &stats.error {
+                        eprintln!("下载任务出错: {e}");
+                    }
+                    (TaskState::Error(DownloadError::Torrent), None)
+                }
             };
 
             out.push(TaskView {
@@ -744,7 +800,7 @@ fn update_snapshot(session: &Arc<Session>, meta_dir: &Path, snapshot: &Arc<Mutex
 }
 
 /// 校验输出目录是否可用(存在或可创建、可写)
-pub fn ensure_output_dir(dir: &Path) -> Result<()> {
+pub fn ensure_output_dir(dir: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(dir)?;
     Ok(())
 }
