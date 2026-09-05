@@ -1,8 +1,9 @@
-//! 设置页:外观(主题模式)、下载目录与关于。
+//! 设置页:外观(主题模式)、下载目录、网络(备用域名)与关于。
 
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::StyledExt;
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::switch::Switch;
 use gpui_kit::component::theme::{Theme, ThemeMode};
 use gpui_kit::{Context, Entity, ScrollHandle, Window, prelude::*, px};
 
@@ -23,6 +24,8 @@ pub struct SettingsPage {
     _input_subscription: gpui_kit::Subscription,
     /// 空目录输入的内联错误提示
     dir_error: bool,
+    /// 是否启用备用域名(与网络层开关、state.json 同步)
+    use_backup_domain: bool,
 }
 
 impl SettingsPage {
@@ -64,6 +67,7 @@ impl SettingsPage {
             dir_input,
             _input_subscription: input_subscription,
             dir_error: false,
+            use_backup_domain: storage::load_use_backup_domain(),
         }
     }
 
@@ -106,6 +110,7 @@ impl Render for SettingsPage {
         let dir_error = self.dir_error;
         let dir_input = self.dir_input.clone();
         let current_dir = storage::load_download_dir();
+        let use_backup = self.use_backup_domain;
 
         let card = |title: &str, desc: &str, body: Vec<gpui_kit::AnyElement>| {
             gpui_kit::div()
@@ -424,6 +429,56 @@ impl Render for SettingsPage {
                     .into_any_element()
             });
 
+        // 备用域名开关:开启后数据源改用 mikanime.tv(国内可直连,无需代理)
+        let backup_row = gpui_kit::div()
+            .w_full()
+            .px(px(16.))
+            .py(px(14.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .child(
+                gpui_kit::div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(icon("globe", 15.).text_color(theme.muted_foreground))
+                    .child(
+                        gpui_kit::div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                gpui_kit::div()
+                                    .text_sm()
+                                    .text_color(theme.foreground)
+                                    .child("备用域名"),
+                            )
+                            .child(
+                                gpui_kit::div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("无法访问 mikanani.me 时,改用 mikanime.tv 获取数据"),
+                            ),
+                    ),
+            )
+            .child({
+                let this = cx.entity();
+                Switch::new("switch-backup-domain")
+                    .checked(use_backup)
+                    .on_click(move |checked, _window, app| {
+                        let enabled = *checked;
+                        storage::save_use_backup_domain(enabled);
+                        source::network::set_backup_domain(enabled);
+                        this.update(app, |s, cx| {
+                            s.use_backup_domain = enabled;
+                            cx.notify();
+                        });
+                    })
+            });
+
         gpui_kit::div()
             .size_full()
             .bg(theme.background)
@@ -458,10 +513,16 @@ impl Render for SettingsPage {
                         vec![dir_row.into_any_element()],
                     ))
                     .child(card(
+                        "网络",
+                        "数据源域名(备用域名适用于无法直连主站的网络)",
+                        vec![backup_row.into_any_element()],
+                    ))
+                    .child(card(
                         "关于",
                         "MikanPlus 的相关信息",
                         vec![
-                            about_row("版本", "0.1.0", "info", None, None).into_any_element(),
+                            about_row("版本", env!("CARGO_PKG_VERSION"), "info", None, None)
+                                .into_any_element(),
                             about_row(
                                 "番剧数据",
                                 "蜜柑计划 (mikanani.me)",

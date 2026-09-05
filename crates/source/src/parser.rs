@@ -142,7 +142,7 @@ pub fn parse_bangumi_list(html: &str) -> Vec<BangumiGroup> {
                 name,
                 bangumi_id: Some(bid),
                 cover_url,
-                detail_url: Some(format!("{}/Home/Bangumi/{bid}", crate::network::BASE_URL)),
+                detail_url: Some(format!("{}/Home/Bangumi/{bid}", crate::network::base_url())),
                 meta: None,
                 subtitle_groups: Vec::new(),
                 #[allow(clippy::redundant_field_names)]
@@ -335,7 +335,7 @@ pub fn parse_search_results(html: &str) -> SearchResults {
             name,
             bangumi_id: Some(bid),
             cover_url,
-            detail_url: Some(format!("{}/Home/Bangumi/{bid}", crate::network::BASE_URL)),
+            detail_url: Some(format!("{}/Home/Bangumi/{bid}", crate::network::base_url())),
             meta: None,
             subtitle_groups: Vec::new(),
             update_date: None,

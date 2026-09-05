@@ -9,6 +9,7 @@ rust-version.workspace = true
 domain = { path = "../domain" }
 scraper.workspace = true
 serde.workspace = true
+thiserror.workspace = true
 ureq.workspace = true
 
 [dev-dependencies]
