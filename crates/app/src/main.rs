@@ -1177,14 +1177,7 @@ impl Render for MikanPlus {
                             });
                             error_view(&err, retry, &theme).into_any_element()
                         } else {
-                            gpui_kit::div()
-                                .size_full()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .text_color(theme.muted_foreground)
-                                .child("正在加载该番剧…")
-                                .into_any_element()
+                            loading_view(&theme).into_any_element()
                         }
                     }
                 }
@@ -1674,21 +1667,53 @@ fn render_filter_modal(
         )
 }
 
-/// 加载中占位视图
+/// 加载中视图:缓慢旋转的加载图标 + 提示文字。
+///
+/// gpui-component 的 Spinner 转速固定为 0.8s/圈且无法配置,这里照其内部实现
+/// 自绘一个 1.6s/圈的版本(仅调整周期,其余行为一致),让等待过程更舒缓。
 fn loading_view(theme: &gpui_kit::component::theme::Theme) -> gpui_kit::Div {
+    use gpui_kit::component::{Icon, IconName, Sizable};
+    use gpui_kit::{Animation, AnimationExt, Transformation, percentage};
     gpui_kit::div()
         .size_full()
         .flex()
         .items_center()
         .justify_center()
-        .flex()
         .flex_col()
-        .gap(px(10.))
+        .child(
+            // 圆形容器 + 缓慢旋转的加载图标:比裸 spinner 更有层次
+            gpui_kit::div()
+                .size(px(64.))
+                .rounded_full()
+                .border_1()
+                .border_color(theme.border)
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(
+                    Icon::new(IconName::Loader)
+                        .with_size(px(30.))
+                        .text_color(theme.primary)
+                        .with_animation(
+                            "loading-spin",
+                            Animation::new(std::time::Duration::from_secs_f64(1.6)).repeat(),
+                            |this, delta| this.transform(Transformation::rotate(percentage(delta))),
+                        ),
+                ),
+        )
         .child(
             gpui_kit::div()
-                .text_sm()
-                .text_color(theme.muted_foreground)
-                .child("正在加载…"),
+                .mt(px(16.))
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(3.))
+                .child(
+                    gpui_kit::div()
+                        .text_sm()
+                        .text_color(theme.muted_foreground)
+                        .child("正在加载…"),
+                ),
         )
 }
 
