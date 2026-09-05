@@ -1,0 +1,26 @@
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "MikanPlus"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+gpui-kit.workspace = true
+domain = { path = "../domain" }
+downloader = { path = "../downloader" }
+source = { path = "../source" }
+storage = { path = "../storage" }
+ui = { path = "../ui" }
+serde_json.workspace = true
+
+[build-dependencies]
+winres.workspace = true
+
+[lints]
+workspace = true

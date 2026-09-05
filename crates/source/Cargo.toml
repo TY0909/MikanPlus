@@ -1,0 +1,18 @@
+[package]
+name = "source"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+domain = { path = "../domain" }
+scraper.workspace = true
+serde.workspace = true
+ureq.workspace = true
+
+[dev-dependencies]
+storage = { path = "../storage" }
+
+[lints]
+workspace = true
