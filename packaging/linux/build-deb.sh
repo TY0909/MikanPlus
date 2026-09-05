@@ -6,7 +6,7 @@
 # 产物: mikanplus_<VERSION>_amd64.deb
 set -euo pipefail
 
-VERSION="${VERSION:-0.2.1}"
+VERSION="${VERSION:-0.2.2}"
 ARCH="${ARCH:-amd64}"
 PKG="mikanplus_${VERSION}_${ARCH}.deb"
 STAGE="deb-stage"

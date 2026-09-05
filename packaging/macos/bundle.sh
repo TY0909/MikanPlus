@@ -6,7 +6,7 @@
 # 产物: MikanPlus-<VERSION>-macos-arm64.dmg
 set -euo pipefail
 
-VERSION="${VERSION:-0.2.1}"
+VERSION="${VERSION:-0.2.2}"
 APP="MikanPlus.app"
 DMG="MikanPlus-${VERSION}-macos-arm64.dmg"
 
