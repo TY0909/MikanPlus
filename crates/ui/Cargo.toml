@@ -1,0 +1,21 @@
+[package]
+name = "ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+gpui-kit.workspace = true
+domain = { path = "../domain" }
+downloader = { path = "../downloader" }
+source = { path = "../source" }
+storage = { path = "../storage" }
+
+[dev-dependencies]
+gpui-kit = { workspace = true, features = ["test-support"] }
+taffy.workspace = true
+
+[lints]
+workspace = true
