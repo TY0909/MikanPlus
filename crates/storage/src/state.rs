@@ -151,6 +151,18 @@ pub fn save_download_dir(dir: &std::path::Path) {
     *download_dir_cache().lock().unwrap() = Some(dir.to_path_buf());
 }
 
+/// 保存「启用备用域名」开关
+pub fn save_use_backup_domain(enabled: bool) {
+    save_json_field("use_backup_domain", &serde_json::Value::Bool(enabled));
+}
+
+/// 读取「启用备用域名」开关(默认关闭,使用主站 mikanani.me)
+pub fn load_use_backup_domain() -> bool {
+    load_json_field("use_backup_domain")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 /// 订阅详情页的剧集筛选关键词(JSON key 使用 "番剧id:字幕组id")
 pub fn save_subgroup_keywords(keywords: &std::collections::HashMap<(u32, u32), String>) {
     let map: serde_json::Map<String, serde_json::Value> = keywords

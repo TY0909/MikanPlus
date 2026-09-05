@@ -12,15 +12,59 @@ use std::{
     io::Read,
     sync::{
         Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
 };
 
 use crate::error::SourceError;
 
-/// 站点根地址
+/// 站点根地址(默认主站)
 pub const BASE_URL: &str = "https://mikanani.me";
+/// 备用域名:国内可直连(对国内 IP 直接出内容;海外访问 302 回主站,两域名同源)
+pub const BACKUP_BASE_URL: &str = "https://mikanime.tv";
+
+/// 是否启用备用域名(进程级)。网络请求在后台线程执行,切换即时生效;
+/// 启动时由设置值恢复,在设置页切换后持久化。
+static USE_BACKUP_DOMAIN: AtomicBool = AtomicBool::new(false);
+
+/// 设置是否使用备用域名
+pub fn set_backup_domain(enabled: bool) {
+    USE_BACKUP_DOMAIN.store(enabled, Ordering::Relaxed);
+}
+
+/// 当前是否使用备用域名
+pub fn use_backup_domain() -> bool {
+    USE_BACKUP_DOMAIN.load(Ordering::Relaxed)
+}
+
+/// 当前选中的数据源根地址
+pub fn base_url() -> &'static str {
+    if use_backup_domain() {
+        BACKUP_BASE_URL
+    } else {
+        BASE_URL
+    }
+}
+
+/// 把已知数据源主机(主站 / 备用)的 URL 改写到当前选中的数据源主机。
+/// 用于兜底历史缓存 / 订阅中按旧域名保存的绝对地址,切换域名后依然可用。
+pub fn normalize_url(url: &str) -> String {
+    rewrite_host(url, base_url())
+}
+
+/// 纯函数:把 url 中任一已知数据源主机替换为 base 主机(便于测试)。
+/// 仅在主机后是空串或路径时替换,避免误伤同前缀的其它域名。
+fn rewrite_host(url: &str, base: &str) -> String {
+    [BASE_URL, BACKUP_BASE_URL]
+        .iter()
+        .find_map(|host| {
+            url.strip_prefix(host)
+                .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+                .map(|rest| format!("{base}{rest}"))
+        })
+        .unwrap_or_else(|| url.to_string())
+}
 
 /// 请求间最小间隔
 const MIN_INTERVAL: Duration = Duration::from_millis(300);
@@ -406,7 +450,7 @@ pub fn site_url(path: &str) -> String {
     } else if lower.starts_with("//") {
         format!("https:{}", path.trim())
     } else {
-        format!("{BASE_URL}{path}")
+        format!("{}{path}", base_url())
     }
 }
 
@@ -421,7 +465,7 @@ pub fn search_url(query: &str) -> String {
             _ => encoded.push_str(&format!("%{b:02X}")),
         }
     }
-    format!("{BASE_URL}/Home/Search?searchstr={encoded}")
+    format!("{}/Home/Search?searchstr={encoded}", base_url())
 }
 
 #[cfg(test)]
@@ -438,6 +482,31 @@ mod tests {
             site_url("https://other.com/x"),
             "https://other.com/x",
             "绝对地址原样返回"
+        );
+    }
+
+    #[test]
+    fn host_rewrite_normalizes_both_mirrors() {
+        // 主站 → 备用
+        assert_eq!(
+            rewrite_host("https://mikanani.me/images/a.jpg", BACKUP_BASE_URL),
+            "https://mikanime.tv/images/a.jpg"
+        );
+        // 备用 → 主站
+        assert_eq!(
+            rewrite_host("https://mikanime.tv/Home/Bangumi/3883", BASE_URL),
+            "https://mikanani.me/Home/Bangumi/3883"
+        );
+        // 未知主机 / 相对路径不改
+        assert_eq!(
+            rewrite_host("https://other.com/x", BASE_URL),
+            "https://other.com/x"
+        );
+        assert_eq!(rewrite_host("/images/a.jpg", BASE_URL), "/images/a.jpg");
+        // 同前缀的其它域名不被误伤
+        assert_eq!(
+            rewrite_host("https://mikanani.me.evil.com/x", BASE_URL),
+            "https://mikanani.me.evil.com/x"
         );
     }
 

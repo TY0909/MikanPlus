@@ -183,6 +183,9 @@ impl MikanPlus {
         cx.new(|cx: &mut Context<Self>| {
             let entity = cx.entity().clone();
 
+            // 恢复上次选择的数据源(备用域名开关),须在任何网络请求前生效
+            source::network::set_backup_domain(storage::load_use_backup_domain());
+
             // 启动时的一次性迁移(旧缓存 v2→v3、DHT 迁入数据目录),幂等。
             // 后台线程执行:涉及目录删除,不阻塞首帧
             std::thread::spawn(|| {
@@ -473,10 +476,11 @@ impl MikanPlus {
             return;
         }
         // 用户主动加载/重试:清除该页面的退避状态,立即放行
-        source::network::reset_backoff(source::network::BASE_URL);
+        let base = source::network::base_url();
+        source::network::reset_backoff(base);
         self.list_state = ListState::Loading;
-        std::thread::spawn(|| {
-            let result = source::network::fetch_html(source::network::BASE_URL)
+        std::thread::spawn(move || {
+            let result = source::network::fetch_html(base)
                 .map(|html| source::parser::parse_bangumi_list(&html));
             if let Ok(groups) = &result {
                 // 写缓存,减少后续访问
@@ -572,14 +576,11 @@ impl MikanPlus {
             return;
         }
         // 用户主动进入/重试:清除该详情页的退避状态,立即放行
-        source::network::reset_backoff(&format!(
-            "{}/Home/Bangumi/{bid}",
-            source::network::BASE_URL
-        ));
+        let url = format!("{}/Home/Bangumi/{bid}", source::network::base_url());
+        source::network::reset_backoff(&url);
         self.detail_loading.insert(name.clone());
         cx.notify();
         std::thread::spawn(move || {
-            let url = format!("{}/Home/Bangumi/{bid}", source::network::BASE_URL);
             let result = source::network::fetch_html(&url)
                 .map(|html| source::parser::parse_bangumi_detail(&html))
                 .map(|(meta, groups)| {
@@ -1421,7 +1422,7 @@ impl Render for MikanPlus {
                 window.toggle_fullscreen();
             }))
             .on_action(cx.listener(|_this, _: &OpenMikanWebsite, _window, _cx| {
-                let _ = storage::paths::open_url("https://mikanani.me/");
+                let _ = storage::paths::open_url(source::network::base_url());
             }))
             // 应用内通知层(右上角弹出,Root 不会自动渲染,需手动挂载)
             .when_some(

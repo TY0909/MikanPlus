@@ -82,12 +82,19 @@ pub fn poster(
             .h(height)
             .object_fit(gpui_kit::ObjectFit::Cover)
             .into_any_element()
-    } else if poster_path.starts_with("http://") || poster_path.starts_with("https://") {
-        // 远程封面:视口懒加载
-        lazy_cover(poster_path, name, is_dark, width, height, rounded, corners)
     } else {
-        // 无效来源:渐变占位
-        placeholder(name, is_dark, width, height, rounded, corners).into_any_element()
+        // 远程 URL 先归一到当前数据源主机:历史缓存 / 订阅可能存着旧域名的绝对地址,
+        // 切换备用域名后按旧地址请求会失败。
+        let url = if poster_path.starts_with("http://") || poster_path.starts_with("https://") {
+            source::network::normalize_url(poster_path)
+        } else {
+            poster_path.to_string()
+        };
+        if url.starts_with("http://") || url.starts_with("https://") {
+            lazy_cover(&url, name, is_dark, width, height, rounded, corners)
+        } else {
+            placeholder(name, is_dark, width, height, rounded, corners).into_any_element()
+        }
     }
 }
 
