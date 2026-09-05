@@ -27,6 +27,11 @@ const BACKOFF_BASE: Duration = Duration::from_secs(30);
 /// 最大并发请求数
 const MAX_CONCURRENCY: usize = 2;
 
+/// 请求总超时(覆盖连接与整个响应体下载;请求在后台线程执行,放宽不会卡 UI)
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
+/// TCP 连接超时
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// 用户代理:表明身份,遵守礼仪
 const USER_AGENT: &str = "MikanPlus/0.1 (+https://mikanani.me)";
 
@@ -217,8 +222,8 @@ fn agent() -> ureq::Agent {
     AGENT
         .get_or_init(|| {
             let mut builder = ureq::AgentBuilder::new()
-                .timeout(Duration::from_secs(15))
-                .timeout_connect(Duration::from_secs(10))
+                .timeout(REQUEST_TIMEOUT)
+                .timeout_connect(CONNECT_TIMEOUT)
                 .user_agent(USER_AGENT);
             // 代理:环境变量优先,macOS 系统代理兜底(进程内只探测一次)
             if let Some(proxy) = env_proxy().or_else(system_proxy) {
