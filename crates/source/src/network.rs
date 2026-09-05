@@ -17,6 +17,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::error::SourceError;
+
 /// 站点根地址
 pub const BASE_URL: &str = "https://mikanani.me";
 
@@ -304,17 +306,25 @@ fn line_bool(text: &str, key: &str) -> bool {
     line_value(text, key).is_some_and(|v| v == "1")
 }
 
+/// 将 ureq 的错误映射为可分发的错误类型。
+fn map_ureq_error(e: ureq::Error) -> SourceError {
+    match e {
+        ureq::Error::Status(code, _) => SourceError::Server(code),
+        ureq::Error::Transport(_) => SourceError::Network,
+    }
+}
+
 /// 抓取 HTML 页面(带节流/退避/并发控制)。退避期内返回 Err。
-pub fn fetch_html(url: &str) -> Result<String, String> {
+pub fn fetch_html(url: &str) -> Result<String, SourceError> {
     if in_backoff(url) {
-        return Err("请求过于频繁,请稍后重试".into());
+        return Err(SourceError::Throttled);
     }
     acquire_slot();
     let result = agent()
         .get(url)
         .call()
-        .map_err(|e| format!("{e}"))
-        .and_then(|r| r.into_string().map_err(|e| format!("{e}")));
+        .map_err(map_ureq_error)
+        .and_then(|r| r.into_string().map_err(|_| SourceError::Decode));
     release_slot();
     match result {
         Ok(text) => {
@@ -332,24 +342,24 @@ pub fn fetch_html(url: &str) -> Result<String, String> {
 /// 超过大小上限时返回 Err(不缓存、不标记成功),避免静默截断。
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
 
-pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, String> {
+pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, SourceError> {
     if in_backoff(url) {
-        return Err("请求过于频繁,请稍后重试".into());
+        return Err(SourceError::Throttled);
     }
     acquire_slot();
     let result = agent()
         .get(url)
         .call()
-        .map_err(|e| format!("{e}"))
+        .map_err(map_ureq_error)
         .and_then(|r| {
             // 多读 1 字节以检测截断:超限必须显式报错
             let mut buf: Vec<u8> = Vec::new();
             r.into_reader()
                 .take((MAX_IMAGE_BYTES + 1) as u64)
                 .read_to_end(&mut buf)
-                .map_err(|e| format!("{e}"))?;
+                .map_err(|_| SourceError::Decode)?;
             if buf.len() > MAX_IMAGE_BYTES {
-                return Err(format!("图片超过 {}MB 上限", MAX_IMAGE_BYTES / 1024 / 1024));
+                return Err(SourceError::ImageTooLarge);
             }
             Ok(buf)
         });

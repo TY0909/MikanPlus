@@ -171,7 +171,7 @@ fn lazy_cover(
                                 .and_then(|bytes| {
                                     storage::cache::store_image(&url, &bytes)
                                         .map(|_| ())
-                                        .ok_or_else(|| "写入缓存失败".to_string())
+                                        .ok_or(source::SourceError::Cache)
                                 })
                                 .is_ok();
                             source::network::finish_image(&url, ok);

@@ -192,7 +192,6 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 name = "app"
 version = "0.2.0"
 dependencies = [
- "anyhow",
  "domain",
  "downloader",
  "gpui-kit",
@@ -1876,11 +1875,11 @@ checksum = "75b325c5dbd37f80359721ad39aca5a29fb04c89279657cffdda8736d0c0b9d2"
 name = "downloader"
 version = "0.2.0"
 dependencies = [
- "anyhow",
  "librqbit",
  "serde",
  "serde_json",
  "storage",
+ "thiserror 2.0.18",
  "tokio",
 ]
 
@@ -7667,6 +7666,7 @@ dependencies = [
  "scraper",
  "serde",
  "storage",
+ "thiserror 2.0.18",
  "ureq",
 ]
 
