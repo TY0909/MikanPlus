@@ -31,6 +31,8 @@ pub struct BangumiDetailPage {
     pub scroll_handle: ScrollHandle,
     /// 下载管理器(添加/取消任务)
     pub downloader: Arc<DownloadManager>,
+    /// 完成的合集任务进入合集页
+    pub on_open_collection: crate::episode_row::OpenCollectionCallback,
 }
 
 /// 打开外部链接，仅允许 HTTP(S)。
@@ -84,6 +86,7 @@ impl RenderOnce for BangumiDetailPage {
         let on_toggle_subscribe = self.on_toggle_subscribe.clone();
         let is_subscribed = self.is_subscribed;
         let downloader = self.downloader.clone();
+        let on_open_collection = self.on_open_collection.clone();
         let dl_snapshot = downloader.snapshot();
         let dl_base = storage::load_download_dir();
 
@@ -346,6 +349,7 @@ impl RenderOnce for BangumiDetailPage {
                                                     ),
                                                     downloader: downloader.clone(),
                                                     snapshot: dl_snapshot.clone(),
+                                                    on_open_collection: on_open_collection.clone(),
                                                     title_max_px,
                                                 },
                                                 move |window, app| {
@@ -373,6 +377,7 @@ struct GroupCardContext {
     dl_dir: PathBuf,
     downloader: Arc<DownloadManager>,
     snapshot: Vec<TaskView>,
+    on_open_collection: crate::episode_row::OpenCollectionCallback,
     /// 剧集行标题列可用宽度(数据层截断用)
     title_max_px: f32,
 }
@@ -441,6 +446,7 @@ fn render_group_card(
             &ctx.dl_dir,
             &ctx.downloader,
             &ctx.snapshot,
+            &ctx.on_open_collection,
             theme,
         );
 
