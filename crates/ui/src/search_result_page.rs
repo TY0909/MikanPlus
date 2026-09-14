@@ -26,7 +26,7 @@ pub struct SearchResultPage {
     pub query: String,
     pub results: SearchResults,
     pub on_card_click: CardClickCallback,
-    /// 下载管理器(预留:搜索结果的剧集行提供下载)
+    /// 下载管理器(搜索结果的单集下载)
     pub downloader: Arc<DownloadManager>,
     /// 当前页码(0 起)
     pub page: usize,
@@ -39,6 +39,10 @@ impl RenderOnce for SearchResultPage {
         let theme = cx.theme();
         let on_card_click = self.on_card_click;
         let on_page_change = self.on_page_change;
+        let downloader = self.downloader.clone();
+        let download_snapshot = downloader.snapshot();
+        // 搜索结果没有番剧/字幕组归属,单集直接放到用户下载目录。
+        let download_dir = storage::load_download_dir();
 
         let total_episodes = self.results.episodes.len();
         let total_pages = total_episodes.div_ceil(SEARCH_PAGE_SIZE).max(1);
@@ -59,102 +63,83 @@ impl RenderOnce for SearchResultPage {
         let content_w = win_w.min(MAX_PAGE_W) - 32.0 * 2.0 - 14.0 * 2.0;
         let title_max_px = (content_w * 0.6).max(60.0);
 
-        // 剧集行:标题 + 大小/时间 + 复制磁力(仅渲染当前页,避免一次渲染全部)
-        let episode_rows = self.results.episodes[start..end]
-            .iter()
-            .enumerate()
-            .map(|(ix, ep)| {
-                let ix = start + ix;
-                let magnet = ep.magnet.clone();
-                let full_title = ep.title.clone();
-                let title = crate::episode_row::truncate_title(&full_title, title_max_px, 14.0);
-                let size = ep.size.clone();
-                let date = ep.date.clone();
+        // 剧集行:标题 + 大小/时间 + 下载/复制磁力(仅渲染当前页,避免一次渲染全部)
+        let episode_rows =
+            self.results.episodes[start..end]
+                .iter()
+                .enumerate()
+                .map(move |(ix, ep)| {
+                    let ix = start + ix;
+                    let magnet = ep.magnet.clone();
+                    let full_title = ep.title.clone();
+                    let title = crate::episode_row::truncate_title(&full_title, title_max_px, 14.0);
+                    let size = ep.size.clone();
+                    let date = ep.date.clone();
+                    let download_button = crate::episode_row::action_button(
+                        ix,
+                        &full_title,
+                        &magnet,
+                        &download_dir,
+                        &downloader,
+                        &download_snapshot,
+                        theme,
+                    );
 
-                gpui_kit::div()
-                    .id(gpui_kit::SharedString::from(format!("search-ep-{ix}")))
-                    .w_full()
-                    .px(px(14.))
-                    .py(px(12.))
-                    .flex()
-                    .items_center()
-                    .gap(px(12.))
-                    .border_t_1()
-                    .border_color(theme.border)
-                    .hover(|style| style.bg(theme.list_hover))
-                    .child(
-                        // 标题列:占剩余空间,超长在数据层截断
-                        gpui_kit::div()
-                            .flex_1()
-                            .min_w(px(0.))
-                            .flex()
-                            .flex_col()
-                            .child(crate::episode_row::title_cell(
-                                ix,
-                                &full_title,
-                                &title,
-                                theme,
-                            ))
-                            .child(
-                                gpui_kit::div()
-                                    .mt(px(3.))
-                                    .flex()
-                                    .gap(px(10.))
-                                    .child(
-                                        gpui_kit::div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(size),
-                                    )
-                                    .child(
-                                        gpui_kit::div()
-                                            .text_xs()
-                                            .text_color(theme.muted_foreground)
-                                            .child(date),
-                                    ),
-                            ),
-                    )
-                    // 操作列:复制磁力(磁力为空时整列隐藏)
-                    .when(!magnet.is_empty(), move |this| {
-                        let copy_magnet = magnet.clone();
-                        this.child(
+                    gpui_kit::div()
+                        .id(gpui_kit::SharedString::from(format!("search-ep-{ix}")))
+                        .w_full()
+                        .px(px(14.))
+                        .py(px(12.))
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .hover(|style| style.bg(theme.list_hover))
+                        .child(
+                            // 标题列:占剩余空间,超长在数据层截断
                             gpui_kit::div()
-                                .flex_shrink_0()
+                                .flex_1()
+                                .min_w(px(0.))
                                 .flex()
-                                .items_center()
-                                .justify_end()
+                                .flex_col()
+                                .child(crate::episode_row::title_cell(
+                                    ix,
+                                    &full_title,
+                                    &title,
+                                    theme,
+                                ))
                                 .child(
                                     gpui_kit::div()
+                                        .mt(px(3.))
                                         .flex()
-                                        .items_center()
-                                        .gap(px(5.))
-                                        .px(px(10.))
-                                        .py(px(5.))
-                                        .rounded(px(6.))
-                                        .border_1()
-                                        .border_color(theme.border)
-                                        .text_xs()
-                                        .text_color(theme.foreground)
-                                        .cursor_pointer()
-                                        .id(gpui_kit::SharedString::from(format!(
-                                            "search-copy-{ix}"
-                                        )))
-                                        .hover(|style| {
-                                            style.bg(theme.list_hover).border_color(theme.primary)
-                                        })
-                                        .on_click(move |_, _, app| {
-                                            app.write_to_clipboard(
-                                                gpui_kit::ClipboardItem::new_string(
-                                                    copy_magnet.clone(),
-                                                ),
-                                            );
-                                        })
-                                        .child(icon("copy", 13.).text_color(theme.muted_foreground))
-                                        .child("复制磁力"),
+                                        .gap(px(10.))
+                                        .child(
+                                            gpui_kit::div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(size),
+                                        )
+                                        .child(
+                                            gpui_kit::div()
+                                                .text_xs()
+                                                .text_color(theme.muted_foreground)
+                                                .child(date),
+                                        ),
                                 ),
                         )
-                    })
-            });
+                        // 操作列:下载(磁力为空时整列隐藏)
+                        .when(!magnet.is_empty(), |this| {
+                            this.child(
+                                gpui_kit::div()
+                                    .flex_shrink_0()
+                                    .flex()
+                                    .items_center()
+                                    .justify_end()
+                                    .child(download_button),
+                            )
+                        })
+                });
 
         // 番剧卡片网格
         let cards = self
