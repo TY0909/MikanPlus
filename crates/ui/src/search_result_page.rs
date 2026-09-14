@@ -26,6 +26,8 @@ pub struct SearchResultPage {
     pub query: String,
     pub results: SearchResults,
     pub on_card_click: CardClickCallback,
+    /// 完成的合集任务进入合集页
+    pub on_open_collection: crate::episode_row::OpenCollectionCallback,
     /// 下载管理器(搜索结果的单集下载)
     pub downloader: Arc<DownloadManager>,
     /// 当前页码(0 起)
@@ -38,6 +40,7 @@ impl RenderOnce for SearchResultPage {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
         let on_card_click = self.on_card_click;
+        let on_open_collection = self.on_open_collection;
         let on_page_change = self.on_page_change;
         let downloader = self.downloader.clone();
         let download_snapshot = downloader.snapshot();
@@ -63,7 +66,7 @@ impl RenderOnce for SearchResultPage {
         let content_w = win_w.min(MAX_PAGE_W) - 32.0 * 2.0 - 14.0 * 2.0;
         let title_max_px = (content_w * 0.6).max(60.0);
 
-        // 剧集行:标题 + 大小/时间 + 下载/复制磁力(仅渲染当前页,避免一次渲染全部)
+        // 剧集行:标题 + 大小/时间 + 下载操作(仅渲染当前页,避免一次渲染全部)
         let episode_rows =
             self.results.episodes[start..end]
                 .iter()
@@ -82,6 +85,7 @@ impl RenderOnce for SearchResultPage {
                         &download_dir,
                         &downloader,
                         &download_snapshot,
+                        &on_open_collection,
                         theme,
                     );
 

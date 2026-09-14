@@ -38,7 +38,10 @@ use ui::home_view::{FilterChangeCallback, HomeView, today_weekday};
 use ui::subgroup_detail_page::OpenFilterCallback;
 use ui::subscription_page::{SubCardClickCallback, UnsubscribeCallback};
 use ui::toolbar::{ActionCallback, NavigateCallback, SearchCallback, Toolbar};
-use ui::{BangumiDetailPage, SearchResultPage, SettingsPage, SubGroupDetailPage, SubscriptionPage};
+use ui::{
+    BangumiDetailPage, DownloadCollectionPage, SearchResultPage, SettingsPage, SubGroupDetailPage,
+    SubscriptionPage,
+};
 
 pub type GoBackCallback = Rc<dyn Fn(&mut Window, &mut App)>;
 pub type CardClickCallback = Rc<dyn Fn(&str, Option<u32>, &mut Window, &mut App)>;
@@ -158,6 +161,7 @@ struct MikanPlus {
     filter_input: Entity<InputState>,
     downloader: std::sync::Arc<DownloadManager>,
     on_card_click: CardClickCallback,
+    on_open_collection: ui::episode_row::OpenCollectionCallback,
     on_toggle_subscribe: ToggleSubscribeCallback,
 }
 
@@ -304,6 +308,16 @@ impl MikanPlus {
                 })
             };
 
+            // 完成的多视频下载任务 → 合集页
+            let on_open_collection: ui::episode_row::OpenCollectionCallback = {
+                let entity = entity.clone();
+                Rc::new(move |task_id, _window, app: &mut App| {
+                    entity.update(app, |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
+                        mp.navigate_to(Page::DownloadCollection(task_id), cx);
+                    });
+                })
+            };
+
             // 详情页 / 字幕组页「订阅」→ 切换单个字幕组的订阅(以字幕组为单位)
             let on_toggle_subscribe: ToggleSubscribeCallback = {
                 let entity = entity.clone();
@@ -435,6 +449,7 @@ impl MikanPlus {
                 filter_input,
                 downloader: DownloadManager::start(),
                 on_card_click,
+                on_open_collection,
                 on_toggle_subscribe,
             };
             // 启动列表加载(缓存命中则零请求)
@@ -873,6 +888,7 @@ impl MikanPlus {
             Page::BangumiDetail(name) => name.clone(),
             Page::SubGroupDetail(_, _) => "字幕组".to_string(),
             Page::SearchResult(q) => format!("搜索「{q}」"),
+            Page::DownloadCollection(_) => "查看合集".to_string(),
         }
     }
 
@@ -885,6 +901,7 @@ impl MikanPlus {
             Page::BangumiDetail(name) => format!("detail:{name}"),
             Page::SubGroupDetail(bid, sid) => format!("subgroup:{bid}:{sid}"),
             Page::SearchResult(q) => format!("search:{q}"),
+            Page::DownloadCollection(id) => format!("download-collection:{id}"),
         }
     }
 
@@ -1069,6 +1086,30 @@ impl Render for MikanPlus {
                 page.into_any_element()
             }
             Page::Settings => self.settings.clone().into_any_element(),
+            Page::DownloadCollection(task_id) => {
+                let task = self
+                    .downloader
+                    .snapshot()
+                    .into_iter()
+                    .find(|task| task.id == task_id);
+                if let Some(task) = task {
+                    let page = DownloadCollectionPage {
+                        title: task.title,
+                        files: task.video_files,
+                        output_dir: task.output_dir,
+                    };
+                    scroll_page(page, &scroll_handle)
+                } else {
+                    gpui_kit::div()
+                        .size_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .text_color(theme.muted_foreground)
+                        .child("下载任务不存在或已被删除")
+                        .into_any_element()
+                }
+            }
             Page::BangumiDetail(name) => {
                 // 兜底触发加载(首次渲染且未走 navigate 时)
                 self.ensure_detail(name.clone(), cx);
@@ -1080,6 +1121,7 @@ impl Render for MikanPlus {
                         on_toggle_subscribe: self.on_toggle_subscribe.clone(),
                         scroll_handle: scroll_handle.clone(),
                         downloader: self.downloader.clone(),
+                        on_open_collection: self.on_open_collection.clone(),
                     };
                     detail.into_any_element()
                 } else if let Some(err) = self.detail_error.get(&name) {
@@ -1133,6 +1175,7 @@ impl Render for MikanPlus {
                             group,
                             scroll_handle: scroll_handle.clone(),
                             downloader: self.downloader.clone(),
+                            on_open_collection: self.on_open_collection.clone(),
                             keyword: keyword.clone(),
                             on_open_filter: on_open_filter.clone(),
                         };
@@ -1165,6 +1208,7 @@ impl Render for MikanPlus {
                                 group,
                                 scroll_handle: scroll_handle.clone(),
                                 downloader: self.downloader.clone(),
+                                on_open_collection: self.on_open_collection.clone(),
                                 keyword: keyword.clone(),
                                 on_open_filter: on_open_filter.clone(),
                             };
@@ -1212,6 +1256,7 @@ impl Render for MikanPlus {
                         query: query.clone(),
                         results: results.clone(),
                         on_card_click: self.on_card_click.clone(),
+                        on_open_collection: self.on_open_collection.clone(),
                         downloader: self.downloader.clone(),
                         page,
                         on_page_change,

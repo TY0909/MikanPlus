@@ -26,6 +26,8 @@ pub struct SubGroupDetailPage {
     pub scroll_handle: ScrollHandle,
     /// 下载管理器(添加/取消任务)
     pub downloader: Arc<DownloadManager>,
+    /// 完成的合集任务进入合集页
+    pub on_open_collection: crate::episode_row::OpenCollectionCallback,
     /// 当前筛选关键词(空 = 不过滤;剧集标题必须包含该关键词)
     pub keyword: String,
     /// 点击「筛选」按钮时打开筛选窗口
@@ -41,6 +43,7 @@ impl RenderOnce for SubGroupDetailPage {
         let episodes = group.episodes.clone();
         let total = episodes.len();
         let downloader = self.downloader.clone();
+        let on_open_collection = self.on_open_collection.clone();
         let dl_snapshot = downloader.snapshot();
         let dl_dir =
             paths::subgroup_download_dir(&storage::load_download_dir(), &bangumi_name, &group_name);
@@ -130,6 +133,7 @@ impl RenderOnce for SubGroupDetailPage {
                 &dl_dir,
                 &downloader,
                 &dl_snapshot,
+                &on_open_collection,
                 theme,
             );
 
