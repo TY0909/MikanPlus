@@ -1,4 +1,4 @@
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::StyledExt;
@@ -25,8 +25,12 @@ impl BangumiFormat {
 /// 卡片点击回调
 pub type CardAction = Rc<dyn Fn(&mut Window, &mut App)>;
 
+struct BangumiCardHoverState {
+    hovered: bool,
+}
+
 /// 番剧卡片:海报 + 名称 + 订阅状态。
-/// 悬停时显示播放遮罩。
+/// 悬停时整体向上移动,并通过边框与阴影提供轻量反馈。
 #[derive(IntoElement)]
 pub struct BangumiCard {
     pub name: String,
@@ -52,11 +56,10 @@ impl BangumiCard {
 }
 
 impl RenderOnce for BangumiCard {
-    fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let name = self.name;
         let on_click = self.on_click;
         let is_dark = cx.theme().mode.is_dark();
-        let theme = cx.theme();
 
         // 调用方保证 key 唯一(未设置时退回名称,至少可运行)
         let card_id: gpui_kit::SharedString = if self.key.is_empty() {
@@ -65,43 +68,25 @@ impl RenderOnce for BangumiCard {
             self.key.into()
         };
 
-        // 播放遮罩:默认透明,卡片悬停时淡入;圆角与海报区一致(只圆顶部)
-        let play_overlay = gpui_kit::div()
-            .absolute()
-            .inset_0()
-            .rounded_t(px(10.))
-            .flex()
-            .flex_col()
-            .items_center()
-            .justify_center()
-            .gap(px(8.))
-            .bg(gpui_kit::hsla(0., 0., 0., 0.55))
-            .opacity(0.)
-            .hover(|style| style.opacity(1.))
-            .child(
-                gpui_kit::div()
-                    .size(px(48.))
-                    .rounded_full()
-                    .bg(gpui_kit::hsla(0., 0., 1.0, 0.95))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .shadow_lg()
-                    .child(
-                        gpui_kit::div()
-                            .text_xl()
-                            .text_color(gpui_kit::hsla(0., 0., 0.85, 0.95))
-                            .pl(px(2.))
-                            .child("▶"),
-                    ),
-            )
-            .child(
-                gpui_kit::div()
-                    .text_sm()
-                    .font_semibold()
-                    .text_color(gpui_kit::hsla(0., 0., 1.0, 0.95))
-                    .child("查看详情"),
-            );
+        let hover_state = window.use_keyed_state(card_id.clone(), cx, |_, _| {
+            BangumiCardHoverState { hovered: false }
+        });
+        let hover_target = if hover_state.read(cx).hovered {
+            px(-4.)
+        } else {
+            px(0.)
+        };
+        let hover_offset = gpui_kit::base::transition(
+            card_id.clone(),
+            hover_target,
+            gpui_kit::base::Transition::new(Duration::from_millis(800)).ease(
+                gpui_kit::base::animation::cubic_bezier(0.22, 1.0, 0.36, 1.0),
+            ),
+            window,
+            cx,
+        );
+        let hover_state_for_listener = hover_state.clone();
+        let theme = cx.theme();
 
         let mut card = gpui_kit::div()
             .w(px(180.))
@@ -110,6 +95,8 @@ impl RenderOnce for BangumiCard {
             .overflow_hidden()
             .border_1()
             .border_color(theme.border)
+            .relative()
+            .top(hover_offset)
             .id(card_id)
             .flex()
             .flex_col()
@@ -118,6 +105,14 @@ impl RenderOnce for BangumiCard {
                     .bg(app_theme::card_hover(theme))
                     .border_color(theme.primary)
                     .shadow(app_theme::card_shadow_hover(theme))
+            })
+            .on_hover(move |hovered, _, cx| {
+                hover_state_for_listener.update(cx, |state, cx| {
+                    if state.hovered != *hovered {
+                        state.hovered = *hovered;
+                        cx.notify();
+                    }
+                });
             });
 
         if let Some(cb) = on_click {
@@ -126,7 +121,7 @@ impl RenderOnce for BangumiCard {
             });
         }
 
-        // 海报区:只圆顶部两角(底部直角,与下方文字区拼接),溢出裁剪保证悬停遮罩不超出圆角
+        // 海报区:只圆顶部两角(底部直角,与下方文字区拼接)
         let poster_area = gpui_kit::div()
             .h(px(252.))
             .w_full()
@@ -141,22 +136,7 @@ impl RenderOnce for BangumiCard {
                 px(252.),
                 10.,
                 crate::poster::CornerStyle::Top,
-            ))
-            .child(
-                // 左上角:格式徽章
-                gpui_kit::div()
-                    .absolute()
-                    .top(px(8.))
-                    .left(px(8.))
-                    .px(px(7.))
-                    .py(px(2.))
-                    .rounded_full()
-                    .bg(gpui_kit::hsla(0., 0., 0., 0.45))
-                    .text_xs()
-                    .text_color(gpui_kit::hsla(0., 0., 1.0, 0.95))
-                    .child(self.format.label().to_string()),
-            )
-            .child(play_overlay);
+            ));
 
         // 名称区:仅显示番剧名;最多两行,超出显示省略号
         // (gpui 0.2.2 的 line_clamp 不带省略号,需配 text_ellipsis)
