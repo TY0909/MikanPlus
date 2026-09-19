@@ -163,6 +163,21 @@ pub fn load_use_backup_domain() -> bool {
         .unwrap_or(false)
 }
 
+/// 保存退订确认窗口中「移除下载目录和文件」的默认选项。
+pub fn save_remove_downloads_on_unsubscribe(enabled: bool) {
+    save_json_field(
+        "remove_downloads_on_unsubscribe",
+        &serde_json::Value::Bool(enabled),
+    );
+}
+
+/// 读取退订时是否默认移除下载目录和文件(默认关闭,保留用户下载内容)。
+pub fn load_remove_downloads_on_unsubscribe() -> bool {
+    load_json_field("remove_downloads_on_unsubscribe")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
 /// 订阅详情页的剧集筛选关键词(JSON key 使用 "番剧id:字幕组id")
 pub fn save_subgroup_keywords(keywords: &std::collections::HashMap<(u32, u32), String>) {
     let map: serde_json::Map<String, serde_json::Value> = keywords

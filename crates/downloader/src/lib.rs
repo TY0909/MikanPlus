@@ -14,7 +14,7 @@
 //! (见 [`TRACKERS`])合并为一份统一列表(去重),不做来源区分。
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -148,8 +148,8 @@ pub struct TaskView {
     pub state: TaskState,
     /// 当前活跃(已连接)的 peer 数
     pub peers: usize,
-    /// 完成后的文件路径(「打开」用)
-    pub output_file: Option<PathBuf>,
+    /// 完成后的所有视频文件路径。单个视频直接打开,多个视频进入合集页。
+    pub video_files: Vec<PathBuf>,
     /// 任务输出目录(退订清理时按目录定位任务)
     pub output_dir: Option<PathBuf>,
 }
@@ -164,11 +164,18 @@ pub enum DownloadCmd {
     },
     /// 取消任务(删除已下载文件)
     Cancel { id: String },
-    /// 清理订阅目录(退订):检查进行中任务 → 有则回执阻断,无则取消残留任务并删除目录
-    CleanupDir {
+    /// 退订前检查目录中是否有正在下载的任务,不修改任何数据。
+    CheckUnsubscribeDir {
         dir: PathBuf,
         bangumi_name: String,
         group_name: String,
+    },
+    /// 完成退订:原子检查进行中任务,按选项决定是否清理目录和文件。
+    Unsubscribe {
+        dir: PathBuf,
+        bangumi_name: String,
+        group_name: String,
+        remove_downloads: bool,
     },
 }
 
@@ -234,8 +241,12 @@ pub enum DownloadEvent {
     AddFailed { title: String, error: DownloadError },
     /// 下载引擎启动失败(后台线程退出,所有下载功能不可用)
     EngineFailed { error: DownloadError },
-    /// 退订目录清理被阻断:该目录仍有进行中的任务
+    /// 下载任务完成(仅在运行期间从非完成态首次转为完成态时发送)
+    DownloadCompleted { title: String },
+    /// 退订被阻断:该目录仍有进行中的任务
     UnsubscribeBlocked { dir: PathBuf, titles: Vec<String> },
+    /// 退订前检查通过,UI 可以显示最终确认窗口
+    UnsubscribeCheckReady { dir: PathBuf },
     /// 退订目录清理完成(目录已删除,UI 可移除订阅记录)
     UnsubscribeDone { dir: PathBuf },
 }
@@ -325,6 +336,11 @@ async fn run_loop(
     cleanup_orphan_meta(&persist_dir, &meta_dir);
 
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // 仅记录本次运行期间已经观察到的状态。这样恢复应用时不会为历史上
+    // 已经完成的任务重复弹出通知,但真正发生的 Downloading → Completed
+    // 转换仍能被准确捕获。
+    let mut observed_states = HashMap::new();
+    let mut observed_once = false;
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => {
@@ -343,14 +359,70 @@ async fn run_loop(
                         handle_cmd(&session, &meta_dir, cmd).await;
                     });
                 } else {
-                    // 取消和目录清理保持 actor 顺序，不与彼此并发。
+                    // 取消和退订检查/清理保持 actor 顺序，不与彼此并发。
                     handle_cmd(&session, &meta_dir, cmd).await;
                 }
             }
-            _ = tick.tick() => update_snapshot(&session, &meta_dir, &snapshot),
+            _ = tick.tick() => {
+                update_snapshot(
+                    &session,
+                    &meta_dir,
+                    &snapshot,
+                    &mut observed_states,
+                    &mut observed_once,
+                );
+            },
         }
     }
     session.stop().await;
+}
+
+/// 收集指定下载目录中仍在进行的任务标题。
+///
+/// 同时检查已经写入 librqbit 的任务和 metadata 获取中的 pending 任务,
+/// 避免退订确认窗口打开期间漏掉刚开始的下载。
+fn active_titles_for_dir(session: &Arc<Session>, meta_dir: &Path, dir: &Path) -> Vec<String> {
+    let mut metas: Vec<(String, TaskMeta)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(meta_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(meta) = serde_json::from_str::<TaskMeta>(&text)
+                && meta.output_dir == dir
+            {
+                metas.push((stem.to_string(), meta));
+            }
+        }
+    }
+
+    let mut active = Vec::new();
+    for (hash, meta) in &metas {
+        let in_session = session.with_torrents(|it| {
+            let mut found = false;
+            for (_, handle) in it {
+                if handle.info_hash().as_string().to_lowercase() == *hash
+                    && !handle.stats().finished
+                {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        });
+        if in_session {
+            active.push(meta.title.clone());
+        }
+    }
+    let pendings = PENDING.lock().unwrap().clone().unwrap_or_default();
+    active.extend(
+        pendings
+            .values()
+            .filter(|pending| pending.output_dir == dir)
+            .map(|pending| pending.title.clone()),
+    );
+    active
 }
 
 /// 处理一条下载命令
@@ -472,6 +544,23 @@ async fn handle_cmd(session: &Arc<Session>, meta_dir: &Path, cmd: DownloadCmd) {
                 }
             }
         }
+        DownloadCmd::CheckUnsubscribeDir {
+            dir,
+            bangumi_name,
+            group_name,
+        } => {
+            let active = active_titles_for_dir(session, meta_dir, &dir);
+            if active.is_empty() {
+                push_event(DownloadEvent::UnsubscribeCheckReady { dir });
+            } else {
+                let count = active.len();
+                eprintln!("退订「{bangumi_name} - {group_name}」被阻断:{count} 个剧集正在下载");
+                push_event(DownloadEvent::UnsubscribeBlocked {
+                    dir,
+                    titles: active,
+                });
+            }
+        }
         DownloadCmd::Cancel { id } => {
             // 先读元信息(取消日志需要标题)
             let meta_path = meta_dir.join(format!("{id}.json"));
@@ -501,10 +590,11 @@ async fn handle_cmd(session: &Arc<Session>, meta_dir: &Path, cmd: DownloadCmd) {
                 eprintln!("「{}」已取消,文件已删除", meta.title);
             }
         }
-        DownloadCmd::CleanupDir {
+        DownloadCmd::Unsubscribe {
             dir,
             bangumi_name,
             group_name,
+            remove_downloads,
         } => {
             // 退订清理:检查与取消、删目录在同一线程内原子完成,
             // 不依赖 UI 侧的周期快照(避免「刚点下载就退订」的竞态窗口)。
@@ -560,6 +650,13 @@ async fn handle_cmd(session: &Arc<Session>, meta_dir: &Path, cmd: DownloadCmd) {
                     dir: dir.clone(),
                     titles: active,
                 });
+                return;
+            }
+
+            if !remove_downloads {
+                // 用户选择保留下载内容:通过同一 actor 的检查后放行退订,
+                // 不取消任务、不删除元信息、不触碰目录。
+                push_event(DownloadEvent::UnsubscribeDone { dir });
                 return;
             }
 
@@ -664,7 +761,13 @@ fn cleanup_orphan_meta(session_dir: &Path, meta_dir: &Path) {
 }
 
 /// 生成任务快照(每秒)
-fn update_snapshot(session: &Arc<Session>, meta_dir: &Path, snapshot: &Arc<Mutex<Vec<TaskView>>>) {
+fn update_snapshot(
+    session: &Arc<Session>,
+    meta_dir: &Path,
+    snapshot: &Arc<Mutex<Vec<TaskView>>>,
+    observed_states: &mut HashMap<String, TaskState>,
+    observed_once: &mut bool,
+) {
     // 读取业务元信息
     let mut metas: HashMap<String, TaskMeta> = HashMap::new();
     if let Ok(entries) = std::fs::read_dir(meta_dir) {
@@ -698,7 +801,7 @@ fn update_snapshot(session: &Arc<Session>, meta_dir: &Path, snapshot: &Arc<Mutex
                         total: 0,
                         state: TaskState::Initializing,
                         peers: 0,
-                        output_file: None,
+                        video_files: Vec::new(),
                         output_dir: Some(p.output_dir),
                     },
                 )
@@ -712,42 +815,61 @@ fn update_snapshot(session: &Arc<Session>, meta_dir: &Path, snapshot: &Arc<Mutex
             let stats = h.stats();
             let meta = metas.get(&hash);
 
-            let (state, output_file) = match &stats.state {
-                TorrentStatsState::Initializing { .. } => (TaskState::Initializing, None),
+            let (state, video_files) = match &stats.state {
+                TorrentStatsState::Initializing { .. } => (TaskState::Initializing, Vec::new()),
                 TorrentStatsState::Live if stats.finished => {
-                    // 完成:尝试获取落盘文件路径(一般单文件,取第一个)。
-                    // 种子内部文件名来自远端元数据,必须清洗并校验路径
-                    // 仍在输出目录内(防路径逃逸)。
-                    let file = h
-                        .with_metadata(|m| {
-                            let mut it = m.info.iter_file_details();
-                            it.next().map(|fd| fd.filename.to_pathbuf())
-                        })
-                        .unwrap_or_default()
-                        .unwrap_or_default();
-                    let out = meta.and_then(|m| {
-                        let safe = crate::paths::sanitize_file_name(&file.to_string_lossy());
-                        if safe.is_empty() {
-                            return None;
+                    match meta {
+                        Some(meta) => {
+                            // 只根据当前种子的 metadata 解析路径,不会扫描整个输出目录,
+                            // 因而多个搜索任务共用下载目录时也不会互相串文件。
+                            let files = h
+                                .with_metadata(|m| {
+                                    m.info
+                                        .iter_file_details()
+                                        .filter_map(|fd| {
+                                            safe_task_file_path(
+                                                &meta.output_dir,
+                                                &fd.filename.to_pathbuf(),
+                                            )
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
+                            let expected_video_count =
+                                files.iter().filter(|path| is_video_file(path)).count();
+                            let output_root = meta.output_dir.canonicalize().ok();
+                            let videos = files
+                                .iter()
+                                .filter(|p| {
+                                    is_video_file(p)
+                                        && is_safe_existing_path(output_root.as_deref(), p)
+                                })
+                                .cloned()
+                                .collect::<Vec<_>>();
+                            let has_required_content = if expected_video_count > 0 {
+                                !videos.is_empty()
+                            } else {
+                                files.iter().any(|path| path.is_file())
+                            };
+                            let state = if has_required_content {
+                                TaskState::Completed
+                            } else {
+                                // 视频(或无视频种子中的全部文件)被外部删除时标记 Missing。
+                                TaskState::Missing
+                            };
+                            (state, videos)
                         }
-                        let p = m.output_dir.join(safe);
-                        p.starts_with(&m.output_dir).then_some(p)
-                    });
-                    // 文件被外部删除时标记 Missing,UI 回到「下载」态
-                    let state = match &out {
-                        Some(p) if !p.exists() => TaskState::Missing,
-                        _ => TaskState::Completed,
-                    };
-                    (state, out)
+                        None => (TaskState::Completed, Vec::new()),
+                    }
                 }
-                TorrentStatsState::Live => (TaskState::Downloading, None),
-                TorrentStatsState::Paused => (TaskState::Downloading, None),
+                TorrentStatsState::Live => (TaskState::Downloading, Vec::new()),
+                TorrentStatsState::Paused => (TaskState::Downloading, Vec::new()),
                 TorrentStatsState::Error => {
                     // 底层错误细节只进日志,UI 只展示「下载出错」
                     if let Some(e) = &stats.error {
                         eprintln!("下载任务出错: {e}");
                     }
-                    (TaskState::Error(DownloadError::Torrent), None)
+                    (TaskState::Error(DownloadError::Torrent), Vec::new())
                 }
             };
 
@@ -780,7 +902,7 @@ fn update_snapshot(session: &Arc<Session>, meta_dir: &Path, snapshot: &Arc<Mutex
                     .map(|l| l.snapshot.peer_stats.live as usize)
                     .unwrap_or(0),
                 state,
-                output_file,
+                video_files,
                 output_dir: meta.map(|m| m.output_dir.clone()),
             });
         }
@@ -790,6 +912,30 @@ fn update_snapshot(session: &Arc<Session>, meta_dir: &Path, snapshot: &Arc<Mutex
         views.insert(v.id.clone(), v);
     }
     let views: Vec<TaskView> = views.into_values().collect();
+    // HashMap 的随机迭代顺序不应成为快照变化来源,否则会让 UI 每秒无意义重绘。
+    let mut views = views;
+    views.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+
+    if *observed_once {
+        for view in &views {
+            if matches!(view.state, TaskState::Completed)
+                && !observed_states
+                    .get(&view.id)
+                    .is_some_and(|state| matches!(state, TaskState::Completed))
+            {
+                push_event(DownloadEvent::DownloadCompleted {
+                    title: view.title.clone(),
+                });
+            }
+        }
+    }
+    observed_states.clear();
+    observed_states.extend(
+        views
+            .iter()
+            .map(|view| (view.id.clone(), view.state.clone())),
+    );
+    *observed_once = true;
 
     // 仅在内容变化时递增版本,避免无任务时空转重绘
     let mut guard = snapshot.lock().unwrap();
@@ -797,6 +943,59 @@ fn update_snapshot(session: &Arc<Session>, meta_dir: &Path, snapshot: &Arc<Mutex
         *guard = views;
         SNAPSHOT_VERSION.fetch_add(1, Ordering::Relaxed);
     }
+}
+
+/// 视频文件扩展名。下载内容可能同时包含字幕、字体、校验文件等,这些不应成为可播放项。
+fn is_video_file(path: &Path) -> bool {
+    let Some(extension) = path.extension().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    matches!(
+        extension.to_ascii_lowercase().as_str(),
+        "3gp"
+            | "avi"
+            | "flv"
+            | "m2ts"
+            | "m4v"
+            | "mkv"
+            | "mov"
+            | "mp4"
+            | "mpeg"
+            | "mpg"
+            | "ogv"
+            | "rmvb"
+            | "ts"
+            | "vob"
+            | "webm"
+            | "wmv"
+    )
+}
+
+/// 将种子内的相对文件名解析到任务输出目录,拒绝绝对路径和 `..` 路径。
+fn safe_task_file_path(output_dir: &Path, relative: &Path) -> Option<PathBuf> {
+    if relative.as_os_str().is_empty()
+        || relative.is_absolute()
+        || relative.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir | Component::RootDir | Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    Some(output_dir.join(relative))
+}
+
+/// 防止已落盘的符号链接把打开动作引向输出目录之外。
+fn is_safe_existing_path(output_root: Option<&Path>, path: &Path) -> bool {
+    let Some(root) = output_root else {
+        return false;
+    };
+    let Some(resolved) = path.canonicalize().ok() else {
+        return false;
+    };
+    resolved.starts_with(root) && resolved.is_file()
 }
 
 /// 校验输出目录是否可用(存在或可创建、可写)
@@ -834,7 +1033,9 @@ pub fn format_percent(progress: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::magnet_info_hash;
+    use std::path::Path;
+
+    use super::{is_video_file, magnet_info_hash, safe_task_file_path};
 
     #[test]
     fn extracts_btih_hex() {
@@ -849,5 +1050,25 @@ mod tests {
     fn rejects_non_40hex() {
         assert_eq!(magnet_info_hash("magnet:?xt=urn:btih:abc"), None);
         assert_eq!(magnet_info_hash("no-magnet"), None);
+    }
+
+    #[test]
+    fn recognizes_video_files_but_not_sidecar_files() {
+        assert!(is_video_file(Path::new("Season 1/01.MKV")));
+        assert!(is_video_file(Path::new("episode.webm")));
+        assert!(!is_video_file(Path::new("episode.ass")));
+        assert!(!is_video_file(Path::new("font.ttf")));
+    }
+
+    #[test]
+    fn resolves_nested_paths_without_allowing_escape() {
+        assert_eq!(
+            safe_task_file_path(Path::new("/downloads"), Path::new("Show/01.mkv")),
+            Some(Path::new("/downloads/Show/01.mkv").to_path_buf())
+        );
+        assert_eq!(
+            safe_task_file_path(Path::new("/downloads"), Path::new("../01.mkv")),
+            None
+        );
     }
 }
