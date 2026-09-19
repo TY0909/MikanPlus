@@ -2,11 +2,14 @@
 //!
 //! 纯内容页(无滚动容器):滚动/居中/宽度上限由外层 `page_scroll` 统一管理。
 
-use std::sync::Arc;
+use std::{rc::Rc, sync::Arc};
 
 use gpui_kit::component::ActiveTheme;
+use gpui_kit::component::Sizable;
 use gpui_kit::component::StyledExt;
-use gpui_kit::{App, Window, prelude::*, px};
+use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::{App, Entity, Window, prelude::*, px};
 
 use crate::bangumi_card::{BangumiCard, BangumiFormat};
 use crate::home_view::CardClickCallback;
@@ -18,12 +21,17 @@ use downloader::DownloadManager;
 /// 每页剧集条数(与蜜柑站内分页一致)
 pub const SEARCH_PAGE_SIZE: usize = 50;
 
+/// 搜索页提交关键词回调。
+pub type SearchCallback = Rc<dyn Fn(String, &mut Window, &mut App)>;
 /// 分页切换回调
 pub type SearchPageChangeCallback = std::rc::Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct SearchResultPage {
     pub query: String,
+    /// 搜索页常驻输入框,页面切换后保留输入状态。
+    pub input_state: Entity<InputState>,
+    pub on_search: SearchCallback,
     pub results: SearchResults,
     pub on_card_click: CardClickCallback,
     /// 完成的合集任务进入合集页
@@ -39,6 +47,10 @@ pub struct SearchResultPage {
 impl RenderOnce for SearchResultPage {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
+        let query = self.query;
+        let has_query = !query.trim().is_empty();
+        let input_state = self.input_state.clone();
+        let on_search = self.on_search.clone();
         let on_card_click = self.on_card_click;
         let on_open_collection = self.on_open_collection;
         let on_page_change = self.on_page_change;
@@ -57,7 +69,30 @@ impl RenderOnce for SearchResultPage {
         let prev_enabled = page > 0;
         let next_enabled = page + 1 < total_pages;
         // 整页空状态(番剧卡片与剧集均为空)
-        let whole_empty = self.results.items.is_empty() && total_episodes == 0;
+        let whole_empty = has_query && self.results.items.is_empty() && total_episodes == 0;
+
+        let search_input = Input::new(&input_state).w_full().h(px(36.)).rounded(px(8.));
+        let search_submit_input = input_state.clone();
+        let search_form = gpui_kit::div()
+            .w_full()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(search_input)
+            .child(
+                Button::new("search-page-submit")
+                    .label("搜索")
+                    .small()
+                    .primary()
+                    .rounded(px(8.))
+                    .on_click(move |_, window, app| {
+                        let query = search_submit_input.read(app).text().to_string();
+                        let query = query.trim().to_string();
+                        if !query.is_empty() {
+                            on_search(query, window, app);
+                        }
+                    }),
+            );
 
         // 标题列可用宽度(与字幕组详情页同款估算):窗口宽受页面最大宽度约束,
         // 减去页面与行的内边距后取 60%。gpui 0.2.2 的 CSS ellipsis 在嵌套
@@ -192,20 +227,46 @@ impl RenderOnce for SearchResultPage {
                                     .text_2xl()
                                     .font_bold()
                                     .text_color(theme.foreground)
-                                    .child(format!("搜索「{}」", self.query)),
+                                    .child(if has_query {
+                                        format!("搜索「{query}」")
+                                    } else {
+                                        "搜索番剧".to_string()
+                                    }),
                             ),
                     )
-                    .child(
-                        gpui_kit::div()
-                            .text_sm()
-                            .text_color(theme.muted_foreground)
-                            .child(format!(
-                                "找到 {} 部番剧 · {} 条剧集",
-                                self.results.items.len(),
-                                total_episodes
-                            )),
-                    ),
+                    .child(search_form)
+                    .when(has_query, |this| {
+                        this.child(
+                            gpui_kit::div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child(format!(
+                                    "找到 {} 部番剧 · {} 条剧集",
+                                    self.results.items.len(),
+                                    total_episodes
+                                )),
+                        )
+                    }),
             )
+            // 空查询状态:仅展示输入框,不发起网络请求。
+            .when(!has_query, |this| {
+                this.child(
+                    gpui_kit::div()
+                        .w_full()
+                        .py(px(64.))
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(icon("search", 28.).text_color(theme.muted_foreground))
+                        .child(
+                            gpui_kit::div()
+                                .text_sm()
+                                .text_color(theme.muted_foreground)
+                                .child("输入关键词开始搜索"),
+                        ),
+                )
+            })
             // 整页空状态:番剧卡片与剧集均为空时居中提示
             .when(whole_empty, |this| {
                 this.child(
@@ -232,7 +293,7 @@ impl RenderOnce for SearchResultPage {
                 )
             })
             // 番剧卡片区 + 剧集结果区(整页为空时不再渲染)
-            .when(!whole_empty, |this| {
+            .when(has_query && !whole_empty, |this| {
                 this.child(
                     // 番剧卡片区
                     gpui_kit::div()
