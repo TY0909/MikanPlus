@@ -66,10 +66,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
+            echo "Missing release notes: docs/releases/${GITHUB_REF_NAME}.md" >&2
+            exit 1
+          }
           gh release create "$GITHUB_REF_NAME" \
             MikanPlus-${{ env.VERSION }}-windows-x86_64.zip \
             packaging/windows/MikanPlus-${{ env.VERSION }}-windows-x86_64-setup.exe \
-            --generate-notes 2>/dev/null \
+            --notes-file "docs/releases/${GITHUB_REF_NAME}.md" 2>/dev/null \
             || gh release upload "$GITHUB_REF_NAME" \
               MikanPlus-${{ env.VERSION }}-windows-x86_64.zip \
               packaging/windows/MikanPlus-${{ env.VERSION }}-windows-x86_64-setup.exe \
@@ -102,9 +106,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
+            echo "Missing release notes: docs/releases/${GITHUB_REF_NAME}.md" >&2
+            exit 1
+          }
           gh release create "$GITHUB_REF_NAME" \
             MikanPlus-${{ env.VERSION }}-macos-arm64.dmg \
-            --generate-notes 2>/dev/null \
+            --notes-file "docs/releases/${GITHUB_REF_NAME}.md" 2>/dev/null \
             || gh release upload "$GITHUB_REF_NAME" \
               MikanPlus-${{ env.VERSION }}-macos-arm64.dmg \
               --clobber
@@ -178,11 +186,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          test -f "docs/releases/${GITHUB_REF_NAME}.md" || {
+            echo "Missing release notes: docs/releases/${GITHUB_REF_NAME}.md" >&2
+            exit 1
+          }
           gh release create "$GITHUB_REF_NAME" \
             MikanPlus-${{ env.VERSION }}-linux-x86_64.tar.gz \
             mikanplus_${{ env.VERSION }}_amd64.deb \
             MikanPlus-${{ env.VERSION }}-linux-x86_64.AppImage \
-            --generate-notes 2>/dev/null \
+            --notes-file "docs/releases/${GITHUB_REF_NAME}.md" 2>/dev/null \
             || gh release upload "$GITHUB_REF_NAME" \
               MikanPlus-${{ env.VERSION }}-linux-x86_64.tar.gz \
               mikanplus_${{ env.VERSION }}_amd64.deb \
