@@ -26,6 +26,8 @@ pub struct SettingsPage {
     dir_error: bool,
     /// 是否启用备用域名(与网络层开关、state.json 同步)
     use_backup_domain: bool,
+    /// 退订确认窗口默认是否移除下载目录和文件
+    remove_downloads_on_unsubscribe: bool,
 }
 
 impl SettingsPage {
@@ -68,6 +70,7 @@ impl SettingsPage {
             _input_subscription: input_subscription,
             dir_error: false,
             use_backup_domain: storage::load_use_backup_domain(),
+            remove_downloads_on_unsubscribe: storage::load_remove_downloads_on_unsubscribe(),
         }
     }
 
@@ -111,6 +114,7 @@ impl Render for SettingsPage {
         let dir_input = self.dir_input.clone();
         let current_dir = storage::load_download_dir();
         let use_backup = self.use_backup_domain;
+        let remove_downloads_on_unsubscribe = self.remove_downloads_on_unsubscribe;
 
         let card = |title: &str, desc: &str, body: Vec<gpui_kit::AnyElement>| {
             gpui_kit::div()
@@ -479,6 +483,55 @@ impl Render for SettingsPage {
                     })
             });
 
+        // 退订确认窗口的默认清理选项(不会跳过确认窗口)
+        let unsubscribe_cleanup_row = gpui_kit::div()
+            .w_full()
+            .px(px(16.))
+            .py(px(14.))
+            .flex()
+            .items_center()
+            .justify_between()
+            .gap(px(12.))
+            .child(
+                gpui_kit::div()
+                    .flex_1()
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(icon("delete", 15.).text_color(theme.muted_foreground))
+                    .child(
+                        gpui_kit::div()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(
+                                gpui_kit::div()
+                                    .text_sm()
+                                    .text_color(theme.foreground)
+                                    .child("退订时默认移除下载目录和文件"),
+                            )
+                            .child(
+                                gpui_kit::div()
+                                    .text_xs()
+                                    .text_color(theme.muted_foreground)
+                                    .child("控制退订确认窗口的默认选项,仍需手动确认"),
+                            ),
+                    ),
+            )
+            .child({
+                let this = cx.entity();
+                Switch::new("switch-remove-downloads-on-unsubscribe")
+                    .checked(remove_downloads_on_unsubscribe)
+                    .on_click(move |checked, _window, app| {
+                        let enabled = *checked;
+                        storage::save_remove_downloads_on_unsubscribe(enabled);
+                        this.update(app, |s, cx| {
+                            s.remove_downloads_on_unsubscribe = enabled;
+                            cx.notify();
+                        });
+                    })
+            });
+
         gpui_kit::div()
             .size_full()
             .bg(theme.background)
@@ -509,8 +562,11 @@ impl Render for SettingsPage {
                     ))
                     .child(card(
                         "下载",
-                        "下载任务的保存位置",
-                        vec![dir_row.into_any_element()],
+                        "下载任务的保存位置与退订时的默认清理行为",
+                        vec![
+                            dir_row.into_any_element(),
+                            unsubscribe_cleanup_row.into_any_element(),
+                        ],
                     ))
                     .child(card(
                         "网络",

@@ -3,6 +3,7 @@
 //! 番剧详情页与字幕组详情页共用。
 
 use std::path::Path;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use gpui_kit::component::ActiveTheme;
@@ -15,6 +16,9 @@ use gpui_kit::{AnyElement, AnyView, App, Context, Render, Window, prelude::*, px
 use crate::icons::icon;
 use downloader::{DownloadCmd, DownloadManager, TaskState, TaskView, magnet_info_hash};
 use storage::paths;
+
+/// 打开下载合集页的回调。
+pub type OpenCollectionCallback = Rc<dyn Fn(String, &mut Window, &mut App)>;
 
 /// 悬停提示内容视图:完整剧集标题,限宽自动换行。
 ///
@@ -142,6 +146,7 @@ pub fn truncate_title(text: &str, max_px: f32, font_size: f32) -> String {
 }
 
 /// 构建剧集行的右侧操作按钮区
+#[allow(clippy::too_many_arguments)]
 pub fn action_button(
     gix: usize,
     title: &str,
@@ -149,6 +154,7 @@ pub fn action_button(
     dl_dir: &Path,
     downloader: &Arc<DownloadManager>,
     snapshot: &[TaskView],
+    on_open_collection: &OpenCollectionCallback,
     theme: &Theme,
 ) -> AnyElement {
     let has_magnet = !magnet.is_empty();
@@ -202,17 +208,16 @@ pub fn action_button(
     match task.map(|t| &t.state) {
         Some(TaskState::Completed) => {
             let task = task.unwrap();
-            let path = task.output_file.clone();
+            let video_files = task.video_files.clone();
+            let output_dir = task.output_dir.clone();
             let del_id = task.id.clone();
             let del_downloader = downloader.clone();
+            let collection_id = task.id.clone();
             let open_id = gpui_kit::SharedString::from(format!("ep-open-{gix}-{title}"));
             let more_id = gpui_kit::SharedString::from(format!("ep-more-{gix}-{title}"));
-            gpui_kit::div()
-                .flex()
-                .items_center()
-                .gap(px(4.))
-                .child(
-                    // 打开按钮:系统默认播放器播放
+            let open_action = match video_files.as_slice() {
+                [path] => {
+                    let path = path.clone();
                     gpui_kit::div()
                         .flex()
                         .items_center()
@@ -228,13 +233,66 @@ pub fn action_button(
                         .id(open_id)
                         .hover(|style| style.bg(theme.success_hover))
                         .on_click(move |_, _, _| {
-                            if let Some(p) = &path {
-                                let _ = paths::open_path(p);
-                            }
+                            let _ = paths::open_path(&path);
                         })
                         .child(icon("play", 13.).text_color(theme.success_foreground))
-                        .child("打开"),
-                )
+                        .child("打开")
+                        .into_any_element()
+                }
+                [] => {
+                    let output_dir = output_dir.clone();
+                    gpui_kit::div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .px(px(10.))
+                        .py(px(5.))
+                        .rounded(px(6.))
+                        .bg(theme.success)
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(theme.success_foreground)
+                        .cursor_pointer()
+                        .id(open_id)
+                        .hover(|style| style.bg(theme.success_hover))
+                        .on_click(move |_, _, _| {
+                            if let Some(path) = &output_dir {
+                                let _ = paths::open_path(path);
+                            }
+                        })
+                        .child(icon("film", 13.).text_color(theme.success_foreground))
+                        .child("打开目录")
+                        .into_any_element()
+                }
+                _ => {
+                    let on_open_collection = on_open_collection.clone();
+                    gpui_kit::div()
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .px(px(10.))
+                        .py(px(5.))
+                        .rounded(px(6.))
+                        .bg(theme.success)
+                        .text_xs()
+                        .font_semibold()
+                        .text_color(theme.success_foreground)
+                        .cursor_pointer()
+                        .id(open_id)
+                        .hover(|style| style.bg(theme.success_hover))
+                        .on_click(move |_, window, app| {
+                            on_open_collection(collection_id.clone(), window, app);
+                        })
+                        .child(icon("list", 13.).text_color(theme.success_foreground))
+                        .child("查看合集")
+                        .into_any_element()
+                }
+            };
+            gpui_kit::div()
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .child(open_action)
                 .child(
                     // 更多菜单:下拉列表(可扩展更多选项),含标红的「删除」
                     Button::new(more_id)

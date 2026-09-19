@@ -77,4 +77,8 @@ pub enum Page {
     BangumiDetail(String),
     SubGroupDetail(u32, u32),
     SearchResult(String),
+    /// 正在进行中的下载任务观测页
+    DownloadObserver,
+    /// 已完成的多视频下载任务详情(info hash)
+    DownloadCollection(String),
 }

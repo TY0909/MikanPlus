@@ -4,6 +4,8 @@ pub mod actions;
 pub mod app_theme;
 pub mod bangumi_card;
 pub mod bangumi_detail_page;
+pub mod download_collection_page;
+pub mod download_observer_page;
 pub mod episode_row;
 pub mod home_view;
 pub mod icons;
@@ -17,6 +19,8 @@ pub mod toolbar;
 
 pub use bangumi_card::{BangumiCard, BangumiFormat};
 pub use bangumi_detail_page::BangumiDetailPage;
+pub use download_collection_page::DownloadCollectionPage;
+pub use download_observer_page::DownloadObserverPage;
 pub use home_view::HomeView;
 pub use search_result_page::SearchResultPage;
 pub use settings_page::SettingsPage;
