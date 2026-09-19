@@ -241,6 +241,8 @@ pub enum DownloadEvent {
     AddFailed { title: String, error: DownloadError },
     /// 下载引擎启动失败(后台线程退出,所有下载功能不可用)
     EngineFailed { error: DownloadError },
+    /// 下载任务完成(仅在运行期间从非完成态首次转为完成态时发送)
+    DownloadCompleted { title: String },
     /// 退订被阻断:该目录仍有进行中的任务
     UnsubscribeBlocked { dir: PathBuf, titles: Vec<String> },
     /// 退订前检查通过,UI 可以显示最终确认窗口
@@ -334,6 +336,11 @@ async fn run_loop(
     cleanup_orphan_meta(&persist_dir, &meta_dir);
 
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // 仅记录本次运行期间已经观察到的状态。这样恢复应用时不会为历史上
+    // 已经完成的任务重复弹出通知,但真正发生的 Downloading → Completed
+    // 转换仍能被准确捕获。
+    let mut observed_states = HashMap::new();
+    let mut observed_once = false;
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => {
@@ -356,7 +363,15 @@ async fn run_loop(
                     handle_cmd(&session, &meta_dir, cmd).await;
                 }
             }
-            _ = tick.tick() => update_snapshot(&session, &meta_dir, &snapshot),
+            _ = tick.tick() => {
+                update_snapshot(
+                    &session,
+                    &meta_dir,
+                    &snapshot,
+                    &mut observed_states,
+                    &mut observed_once,
+                );
+            },
         }
     }
     session.stop().await;
@@ -746,7 +761,13 @@ fn cleanup_orphan_meta(session_dir: &Path, meta_dir: &Path) {
 }
 
 /// 生成任务快照(每秒)
-fn update_snapshot(session: &Arc<Session>, meta_dir: &Path, snapshot: &Arc<Mutex<Vec<TaskView>>>) {
+fn update_snapshot(
+    session: &Arc<Session>,
+    meta_dir: &Path,
+    snapshot: &Arc<Mutex<Vec<TaskView>>>,
+    observed_states: &mut HashMap<String, TaskState>,
+    observed_once: &mut bool,
+) {
     // 读取业务元信息
     let mut metas: HashMap<String, TaskMeta> = HashMap::new();
     if let Ok(entries) = std::fs::read_dir(meta_dir) {
@@ -891,6 +912,30 @@ fn update_snapshot(session: &Arc<Session>, meta_dir: &Path, snapshot: &Arc<Mutex
         views.insert(v.id.clone(), v);
     }
     let views: Vec<TaskView> = views.into_values().collect();
+    // HashMap 的随机迭代顺序不应成为快照变化来源,否则会让 UI 每秒无意义重绘。
+    let mut views = views;
+    views.sort_unstable_by(|left, right| left.id.cmp(&right.id));
+
+    if *observed_once {
+        for view in &views {
+            if matches!(view.state, TaskState::Completed)
+                && !observed_states
+                    .get(&view.id)
+                    .is_some_and(|state| matches!(state, TaskState::Completed))
+            {
+                push_event(DownloadEvent::DownloadCompleted {
+                    title: view.title.clone(),
+                });
+            }
+        }
+    }
+    observed_states.clear();
+    observed_states.extend(
+        views
+            .iter()
+            .map(|view| (view.id.clone(), view.state.clone())),
+    );
+    *observed_once = true;
 
     // 仅在内容变化时递增版本,避免无任务时空转重绘
     let mut guard = snapshot.lock().unwrap();

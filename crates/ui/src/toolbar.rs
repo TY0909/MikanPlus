@@ -1,4 +1,4 @@
-//! 顶部工具栏:返回/前进 + 分段导航(首页/订阅/设置)+ 搜索 + 主题切换。
+//! 顶部工具栏:返回/前进 + 分段导航(首页/订阅/设置)+ 下载观测 + 搜索 + 主题切换。
 //!
 //! 与 macOS 统一工具栏风格保持一致,内容区顶部常驻。
 //! 分段导航替代了原侧边栏,承担顶层视图切换;子页面(详情/搜索)
@@ -28,12 +28,15 @@ pub struct Toolbar {
     on_go_back: ActionCallback,
     on_toggle_theme: ActionCallback,
     on_navigate: NavigateCallback,
+    on_open_downloads: ActionCallback,
     /// 回车触发搜索的订阅(持有它,随实体销毁自动退订)
     _enter_subscription: gpui_kit::Subscription,
     pub can_go_back: bool,
     pub title: String,
     /// 当前顶层分区(子页面时为 None)
     pub current_section: Option<TopSection>,
+    /// 当前正在下载的任务数,用于工具栏提示和未读感知。
+    pub download_count: usize,
 }
 
 impl Toolbar {
@@ -43,6 +46,7 @@ impl Toolbar {
         on_go_back: ActionCallback,
         on_toggle_theme: ActionCallback,
         on_navigate: NavigateCallback,
+        on_open_downloads: ActionCallback,
         cx: &mut Context<Self>,
     ) -> Self {
         let window_handle = window.window_handle();
@@ -70,10 +74,12 @@ impl Toolbar {
             on_go_back,
             on_toggle_theme,
             on_navigate,
+            on_open_downloads,
             _enter_subscription,
             can_go_back: false,
             title: String::new(),
             current_section: Some(TopSection::Home),
+            download_count: 0,
         }
     }
 
@@ -104,8 +110,10 @@ impl Render for Toolbar {
         let on_go_back = self.on_go_back.clone();
         let on_toggle_theme = self.on_toggle_theme.clone();
         let on_navigate = self.on_navigate.clone();
+        let on_open_downloads = self.on_open_downloads.clone();
         let can_go_back = self.can_go_back;
         let current_section = self.current_section;
+        let download_count = self.download_count;
         let input_state = self.input_state.clone();
         let on_search_btn = self.on_search.clone();
         let window_handle = self.window_handle;
@@ -253,7 +261,7 @@ impl Render for Toolbar {
             )
             // 页面标题(子页面)
             .child(title_el)
-            // 搜索:右侧操作区(搜索框 + 搜索按钮)
+            // 下载观测与搜索:右侧操作区
             .child(
                 gpui_kit::div()
                     .absolute()
@@ -263,6 +271,39 @@ impl Render for Toolbar {
                     .flex()
                     .items_center()
                     .gap(px(8.))
+                    .child(
+                        gpui_kit::div()
+                            .id("tb-download-observer")
+                            .h(px(30.))
+                            .px(px(9.))
+                            .rounded(px(15.))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .cursor_pointer()
+                            .text_color(theme.muted_foreground)
+                            .hover(|style| style.bg(theme.list_hover).text_color(theme.foreground))
+                            .on_click(move |_, window, app| on_open_downloads(window, app))
+                            .child(icon("download", 14.).text_color(theme.muted_foreground))
+                            .child("下载")
+                            .when(download_count > 0, |this| {
+                                this.child(
+                                    gpui_kit::div()
+                                        .min_w(px(16.))
+                                        .h(px(16.))
+                                        .px(px(4.))
+                                        .rounded_full()
+                                        .flex()
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(theme.primary)
+                                        .text_xs()
+                                        .font_semibold()
+                                        .text_color(theme.primary_foreground)
+                                        .child(download_count.to_string()),
+                                )
+                            }),
+                    )
                     .child(
                         gpui_kit::div()
                             .relative()
