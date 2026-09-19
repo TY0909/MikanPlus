@@ -26,7 +26,7 @@ use gpui_kit::{
 use crate::menu::build_menus;
 use domain::navigation::{HomeFilter, Page, TopSection};
 use domain::{BangumiGroup, BangumiItem, SearchResults, Subscription};
-use downloader::{DownloadCmd, DownloadManager};
+use downloader::{DownloadCmd, DownloadManager, TaskState};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
 use source::SourceError;
@@ -40,8 +40,8 @@ use ui::subgroup_detail_page::OpenFilterCallback;
 use ui::subscription_page::{SubCardClickCallback, UnsubscribeCallback};
 use ui::toolbar::{ActionCallback, NavigateCallback, SearchCallback, Toolbar};
 use ui::{
-    BangumiDetailPage, DownloadCollectionPage, SearchResultPage, SettingsPage, SubGroupDetailPage,
-    SubscriptionPage,
+    BangumiDetailPage, DownloadCollectionPage, DownloadObserverPage, SearchResultPage,
+    SettingsPage, SubGroupDetailPage, SubscriptionPage,
 };
 
 pub type GoBackCallback = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -295,6 +295,21 @@ impl MikanPlus {
                                                             },
                                                         );
                                                     }
+                                                    downloader::DownloadEvent::DownloadCompleted {
+                                                        title,
+                                                    } => {
+                                                        let _ = mp.window_handle.update(
+                                                            cx,
+                                                            |_, window, cx| {
+                                                                window.push_notification(
+                                                                    gpui_kit::component::notification::Notification::success(
+                                                                        format!("「{title}」已下载完成"),
+                                                                    ),
+                                                                    cx,
+                                                                );
+                                                            },
+                                                        );
+                                                    }
                                                     downloader::DownloadEvent::UnsubscribeBlocked {
                                                         dir,
                                                         titles,
@@ -415,6 +430,15 @@ impl MikanPlus {
                 })
             };
 
+            let on_open_downloads: ActionCallback = {
+                let entity = entity.clone();
+                Rc::new(move |_window, app: &mut App| {
+                    entity.update(app, |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
+                        mp.navigate_to(Page::DownloadObserver, cx);
+                    });
+                })
+            };
+
             let toolbar = cx.new(|cx| {
                 Toolbar::new(
                     window,
@@ -422,6 +446,7 @@ impl MikanPlus {
                     on_go_back,
                     on_toggle_theme,
                     on_navigate,
+                    on_open_downloads,
                     cx,
                 )
             });
@@ -1051,6 +1076,7 @@ impl MikanPlus {
             Page::BangumiDetail(name) => name.clone(),
             Page::SubGroupDetail(_, _) => "字幕组".to_string(),
             Page::SearchResult(q) => format!("搜索「{q}」"),
+            Page::DownloadObserver => "下载观测".to_string(),
             Page::DownloadCollection(_) => "查看合集".to_string(),
         }
     }
@@ -1064,6 +1090,7 @@ impl MikanPlus {
             Page::BangumiDetail(name) => format!("detail:{name}"),
             Page::SubGroupDetail(bid, sid) => format!("subgroup:{bid}:{sid}"),
             Page::SearchResult(q) => format!("search:{q}"),
+            Page::DownloadObserver => "download-observer".to_string(),
             Page::DownloadCollection(id) => format!("download-collection:{id}"),
         }
     }
@@ -1165,11 +1192,24 @@ impl Render for MikanPlus {
         let can_back = !self.history.is_empty();
         let title = self.page_title();
         let current_section = TopSection::from_page(&self.current_page);
+        let download_count = self
+            .downloader
+            .snapshot()
+            .iter()
+            .filter(|task| matches!(task.state, TaskState::Initializing | TaskState::Downloading))
+            .count();
         self.toolbar.update(cx, |toolbar, cx| {
-            toolbar.can_go_back = can_back;
-            toolbar.title = title.clone();
-            toolbar.current_section = current_section;
-            cx.notify();
+            let changed = toolbar.can_go_back != can_back
+                || toolbar.title != title
+                || toolbar.current_section != current_section
+                || toolbar.download_count != download_count;
+            if changed {
+                toolbar.can_go_back = can_back;
+                toolbar.title = title.clone();
+                toolbar.current_section = current_section;
+                toolbar.download_count = download_count;
+                cx.notify();
+            }
         });
 
         let theme = cx.theme().clone();
@@ -1262,6 +1302,12 @@ impl Render for MikanPlus {
                 page.into_any_element()
             }
             Page::Settings => self.settings.clone().into_any_element(),
+            Page::DownloadObserver => {
+                let page = DownloadObserverPage {
+                    tasks: self.downloader.snapshot(),
+                };
+                scroll_page(page, &scroll_handle)
+            }
             Page::DownloadCollection(task_id) => {
                 let task = self
                     .downloader
