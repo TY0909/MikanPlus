@@ -38,7 +38,7 @@ use ui::app_theme;
 use ui::home_view::{FilterChangeCallback, HomeView, today_weekday};
 use ui::subgroup_detail_page::OpenFilterCallback;
 use ui::subscription_page::{SubCardClickCallback, UnsubscribeCallback};
-use ui::toolbar::{ActionCallback, NavigateCallback, SearchCallback, Toolbar};
+use ui::toolbar::{ActionCallback, NavigateCallback, Toolbar};
 use ui::{
     BangumiDetailPage, DownloadCollectionPage, DownloadObserverPage, SearchResultPage,
     SettingsPage, SubGroupDetailPage, SubscriptionPage,
@@ -176,6 +176,8 @@ struct MikanPlus {
     pending_unsub: Option<(u32, u32, String, String)>,
     /// 筛选窗口输入框状态(常驻,打开时预填当前关键词)
     filter_input: Entity<InputState>,
+    /// 搜索页输入框状态(常驻,进入搜索页后复用)
+    search_input: Entity<InputState>,
     downloader: std::sync::Arc<DownloadManager>,
     on_card_click: CardClickCallback,
     on_open_collection: ui::episode_row::OpenCollectionCallback,
@@ -383,12 +385,23 @@ impl MikanPlus {
                 )
             };
 
-            // 工具栏回调
-            let on_search: SearchCallback = {
+            // 工具栏回调:顶部只负责打开搜索页,实际关键词输入在搜索页完成
+            let on_open_search: ActionCallback = {
                 let entity = entity.clone();
-                Rc::new(move |query, _window, app: &mut App| {
-                    entity.update(app, |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
-                        mp.navigate_to(Page::SearchResult(query), cx);
+                Rc::new(move |window, app: &mut App| {
+                    let window_handle = window.window_handle();
+                    let input = entity.update(
+                        app,
+                        |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
+                        mp.navigate_to(Page::SearchResult(String::new()), cx);
+                            mp.search_input.clone()
+                        },
+                    );
+                    let _ = window_handle.update(app, move |_, window, cx| {
+                        input.update(cx, |state, cx| {
+                            state.set_value(String::new(), window, cx);
+                            state.focus(window, cx);
+                        });
                     });
                 })
             };
@@ -441,8 +454,7 @@ impl MikanPlus {
 
             let toolbar = cx.new(|cx| {
                 Toolbar::new(
-                    window,
-                    on_search,
+                    on_open_search,
                     on_go_back,
                     on_toggle_theme,
                     on_navigate,
@@ -468,6 +480,22 @@ impl MikanPlus {
                         && this.filter_modal.is_some() {
                             this.apply_filter_from_input(cx);
                         }
+                },
+            )
+            .detach();
+
+            let search_input = cx.new(|cx| {
+                InputState::new(window, cx).placeholder("输入番剧名称…")
+            });
+            cx.subscribe(
+                &search_input,
+                move |this: &mut MikanPlus,
+                      _input: Entity<InputState>,
+                      event: &InputEvent,
+                      cx: &mut Context<MikanPlus>| {
+                    if let InputEvent::PressEnter { .. } = event {
+                        this.submit_search(cx);
+                    }
                 },
             )
             .detach();
@@ -500,6 +528,7 @@ impl MikanPlus {
                 pending_unsubscribe_check: None,
                 pending_unsub: None,
                 filter_input,
+                search_input,
                 downloader: DownloadManager::start(),
                 on_card_click,
                 on_open_collection,
@@ -530,11 +559,31 @@ impl MikanPlus {
         if let Page::BangumiDetail(name) = &page {
             self.ensure_detail(name.clone(), cx);
         }
-        // 搜索页:触发在线搜索(缓存命中则零请求)
-        if let Page::SearchResult(q) = &page {
+        // 搜索页:只有提交非空关键词后才触发在线搜索
+        if let Page::SearchResult(q) = &page
+            && !q.trim().is_empty()
+        {
             self.ensure_search(q.clone(), cx);
         }
         cx.notify();
+    }
+
+    /// 从搜索页输入框提交关键词。
+    fn submit_search(&mut self, cx: &mut Context<Self>) {
+        let query = self.search_input.read(cx).text().to_string();
+        let query = query.trim().to_string();
+        if !query.is_empty() {
+            self.navigate_to(Page::SearchResult(query), cx);
+        }
+    }
+
+    /// 打开搜索界面并聚焦输入框。
+    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.navigate_to(Page::SearchResult(String::new()), cx);
+        self.search_input.update(cx, |state, cx| {
+            state.set_value(String::new(), window, cx);
+            state.focus(window, cx);
+        });
     }
 
     /// 加载番剧列表:优先磁盘缓存(30 分钟 TTL),未命中才在后台线程请求网络。
@@ -733,6 +782,9 @@ impl MikanPlus {
 
     /// 确保在线搜索已加载:磁盘缓存命中直接用;否则后台线程请求一次。
     fn ensure_search(&mut self, query: String, cx: &mut Context<Self>) {
+        if query.trim().is_empty() {
+            return;
+        }
         if self.search_results.contains_key(&query) || self.search_loading.contains(&query) {
             return;
         }
@@ -1075,6 +1127,7 @@ impl MikanPlus {
             Page::Settings => "设置".to_string(),
             Page::BangumiDetail(name) => name.clone(),
             Page::SubGroupDetail(_, _) => "字幕组".to_string(),
+            Page::SearchResult(q) if q.trim().is_empty() => "搜索番剧".to_string(),
             Page::SearchResult(q) => format!("搜索「{q}」"),
             Page::DownloadObserver => "下载观测".to_string(),
             Page::DownloadCollection(_) => "查看合集".to_string(),
@@ -1457,8 +1510,18 @@ impl Render for MikanPlus {
                 }
             }
             Page::SearchResult(query) => {
-                // 兜底触发在线搜索(首次渲染且未走 navigate 时)
-                self.ensure_search(query.clone(), cx);
+                // 兜底触发在线搜索(首次渲染且未走 navigate 时),空查询只显示搜索界面。
+                if !query.trim().is_empty() {
+                    self.ensure_search(query.clone(), cx);
+                }
+                let on_search: ui::search_result_page::SearchCallback = {
+                    let entity = cx.entity().clone();
+                    Rc::new(move |query, _window, app: &mut App| {
+                        entity.update(app, |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
+                            mp.navigate_to(Page::SearchResult(query), cx);
+                        });
+                    })
+                };
                 if let Some(results) = self.search_results.get(&query).cloned() {
                     let page = self.search_page.get(&query).copied().unwrap_or(0);
                     let on_page_change: ui::search_result_page::SearchPageChangeCallback = {
@@ -1476,12 +1539,27 @@ impl Render for MikanPlus {
                     };
                     let page = SearchResultPage {
                         query: query.clone(),
+                        input_state: self.search_input.clone(),
+                        on_search: on_search.clone(),
                         results: results.clone(),
                         on_card_click: self.on_card_click.clone(),
                         on_open_collection: self.on_open_collection.clone(),
                         downloader: self.downloader.clone(),
                         page,
                         on_page_change,
+                    };
+                    scroll_page(page, &scroll_handle)
+                } else if query.trim().is_empty() {
+                    let page = SearchResultPage {
+                        query,
+                        input_state: self.search_input.clone(),
+                        on_search,
+                        results: SearchResults::default(),
+                        on_card_click: self.on_card_click.clone(),
+                        on_open_collection: self.on_open_collection.clone(),
+                        downloader: self.downloader.clone(),
+                        page: 0,
+                        on_page_change: Rc::new(|_, _, _| {}),
                     };
                     scroll_page(page, &scroll_handle)
                 } else if let Some(err) = self.search_error.get(&query) {
@@ -1676,9 +1754,7 @@ impl Render for MikanPlus {
                 this.go_back(cx);
             }))
             .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                this.toolbar.update(cx, |toolbar, cx| {
-                    toolbar.focus_search(window, cx);
-                });
+                this.open_search(window, cx);
             }))
             .on_action(cx.listener(|this, _: &CloseFilterModal, _window, cx| {
                 this.close_filter_modal(cx);
@@ -2254,9 +2330,11 @@ fn open_main_window(cx: &mut App) {
                 title: Some("MikanPlus".into()),
                 ..Default::default()
             }),
+            // 工具栏左侧搜索区、中央导航和右侧操作区都需要稳定的最小空间。
+            // 低于这个尺寸时即使内容区可以响应式缩放,工具栏仍会互相覆盖。
             window_min_size: Some(gpui_kit::Size {
-                width: gpui_kit::px(960.),
-                height: gpui_kit::px(640.),
+                width: gpui_kit::px(1200.),
+                height: gpui_kit::px(720.),
             }),
             ..Default::default()
         },
