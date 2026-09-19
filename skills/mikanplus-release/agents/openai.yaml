@@ -1,0 +1,4 @@
+interface:
+  display_name: "MikanPlus Release"
+  short_description: "Prepare and validate MikanPlus releases"
+  default_prompt: "Use $mikanplus-release to prepare the MikanPlus release workflow for a specified version."
