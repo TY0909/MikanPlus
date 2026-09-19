@@ -5,7 +5,7 @@
 Unicode true
 
 !ifndef VERSION
-  !define VERSION "0.2.2"
+  !define VERSION "0.2.3"
 !endif
 
 !define APP_NAME "MikanPlus"
