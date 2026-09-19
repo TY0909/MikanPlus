@@ -3,7 +3,9 @@
 //! 页面只展示尚未完成的任务。下载完成后任务仍保留在下载快照中，供详情页
 //! 显示「打开」操作，但不会继续堆积在这里。
 
-use downloader::{TaskState, TaskView, format_percent, format_rate};
+use std::sync::Arc;
+
+use downloader::{DownloadCmd, DownloadManager, TaskState, TaskView, format_percent, format_rate};
 use gpui_kit::component::ActiveTheme;
 use gpui_kit::component::StyledExt;
 use gpui_kit::{App, Window, prelude::*, px, relative};
@@ -15,6 +17,7 @@ use crate::layout::MAX_SUBGROUP_W;
 #[derive(IntoElement)]
 pub struct DownloadObserverPage {
     pub tasks: Vec<TaskView>,
+    pub downloader: Arc<DownloadManager>,
 }
 
 impl RenderOnce for DownloadObserverPage {
@@ -23,9 +26,10 @@ impl RenderOnce for DownloadObserverPage {
         let tasks: Vec<TaskView> = self
             .tasks
             .into_iter()
-            .filter(|task| matches!(task.state, TaskState::Initializing | TaskState::Downloading))
+            .filter(|task| task.state.is_active())
             .collect();
         let count = tasks.len();
+        let downloader = self.downloader;
 
         let rows = tasks.into_iter().map(|task| {
             let progress = task.progress.clamp(0.0, 1.0);
@@ -39,6 +43,8 @@ impl RenderOnce for DownloadObserverPage {
                 )
             };
             let task_id = task.id;
+            let cancel_id = task_id.clone();
+            let cancel_downloader = downloader.clone();
             gpui_kit::div()
                 .id(gpui_kit::SharedString::from(format!(
                     "download-observer-{task_id}"
@@ -115,6 +121,35 @@ impl RenderOnce for DownloadObserverPage {
                                     format_rate(task.download_rate),
                                     format_rate(task.upload_rate)
                                 )),
+                        )
+                        .child(
+                            gpui_kit::div()
+                                .flex()
+                                .items_center()
+                                .gap(px(4.))
+                                .px(px(8.))
+                                .py(px(4.))
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(theme.border)
+                                .text_xs()
+                                .text_color(theme.muted_foreground)
+                                .cursor_pointer()
+                                .id(gpui_kit::SharedString::from(format!(
+                                    "download-observer-cancel-{task_id}"
+                                )))
+                                .hover(|style| style.bg(theme.list_hover))
+                                .on_click(move |_, _, _| {
+                                    if let Err(error) =
+                                        cancel_downloader.send(DownloadCmd::Cancel {
+                                            id: cancel_id.clone(),
+                                        })
+                                    {
+                                        eprintln!("发送取消下载命令失败: {error}");
+                                    }
+                                })
+                                .child(icon("x", 12.).text_color(theme.muted_foreground))
+                                .child("取消"),
                         ),
                 )
         });
