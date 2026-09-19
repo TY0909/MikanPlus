@@ -130,6 +130,13 @@ pub enum TaskState {
     Error(DownloadError),
 }
 
+impl TaskState {
+    /// 任务仍处于下载观测范围内的前两个阶段。
+    pub fn is_active(&self) -> bool {
+        matches!(self, Self::Initializing | Self::Downloading)
+    }
+}
+
 /// 任务快照(UI 轮询读取)
 #[derive(Debug, Clone, PartialEq)]
 pub struct TaskView {
@@ -336,10 +343,13 @@ async fn run_loop(
     cleanup_orphan_meta(&persist_dir, &meta_dir);
 
     let mut tick = tokio::time::interval(Duration::from_secs(1));
-    // 仅记录本次运行期间已经观察到的状态。恢复的历史任务只建立基线;
-    // 本次运行中新添加的任务另外记录,即使它在首次快照前就完成也能通知。
-    let mut observed_states = HashMap::new();
+    // 恢复的历史任务只用于建立快照基线,不触发完成通知。
+    // 只有本次运行中新添加的任务才允许发送完成通知,避免旧任务恢复时
+    // 从 Initializing/Downloading 短暂过渡到 Completed 造成误报。
     let mut fresh_task_ids = HashSet::new();
+    // librqbit 恢复任务的首个快照可能暂时把已完成任务报告为初始化/下载中。
+    // 首次快照过滤这些历史任务,下一次快照再正常展示确实仍在下载的任务。
+    let mut startup_filter_pending = true;
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => {
@@ -368,8 +378,8 @@ async fn run_loop(
                     &session,
                     &meta_dir,
                     &snapshot,
-                    &mut observed_states,
                     &mut fresh_task_ids,
+                    &mut startup_filter_pending,
                 );
             },
         }
@@ -765,8 +775,8 @@ fn update_snapshot(
     session: &Arc<Session>,
     meta_dir: &Path,
     snapshot: &Arc<Mutex<Vec<TaskView>>>,
-    observed_states: &mut HashMap<String, TaskState>,
     fresh_task_ids: &mut HashSet<String>,
+    startup_filter_pending: &mut bool,
 ) {
     // 读取业务元信息
     let mut metas: HashMap<String, TaskMeta> = HashMap::new();
@@ -916,15 +926,13 @@ fn update_snapshot(
     let mut views = views;
     views.sort_unstable_by(|left, right| left.id.cmp(&right.id));
 
-    for title in completed_download_titles(&views, observed_states, fresh_task_ids) {
+    for title in completed_download_titles(&views, fresh_task_ids) {
         push_event(DownloadEvent::DownloadCompleted { title });
     }
-    observed_states.clear();
-    observed_states.extend(
-        views
-            .iter()
-            .map(|view| (view.id.clone(), view.state.clone())),
-    );
+    if *startup_filter_pending {
+        filter_startup_views(&mut views, fresh_task_ids);
+        *startup_filter_pending = false;
+    }
     // 添加失败、取消或 metadata 获取期间被清理的任务不应永久留在新任务集合中。
     fresh_task_ids.retain(|id| views.iter().any(|view| view.id == *id));
 
@@ -936,31 +944,32 @@ fn update_snapshot(
     }
 }
 
+/// 过滤启动时 librqbit 恢复任务产生的首个不稳定快照。
+///
+/// 历史任务在恢复完成前可能短暂处于 Initializing/Downloading,但下一次快照
+/// 会变成 Completed。首个快照隐藏这些历史任务,避免下载观测页出现瞬时的假任务;
+/// 本次运行中新添加的任务必须保留,否则用户刚点击下载时看不到即时反馈。
+fn filter_startup_views(views: &mut Vec<TaskView>, fresh_task_ids: &HashSet<String>) {
+    views.retain(|view| fresh_task_ids.contains(&view.id) || !view.state.is_active());
+}
+
 /// 找出本次运行中真正完成的任务。
 ///
-/// 恢复的历史完成任务既没有「之前观察到的活动状态」,也不在 fresh 集合中,
-/// 因而只会建立基线而不会触发通知。新添加任务即使跳过中间快照,也由 fresh
-/// 集合保证能够触发一次通知。
+/// 只有本次运行中新添加的任务才会触发通知。
+///
+/// librqbit 恢复历史任务时可能先报告初始化/下载状态,再报告完成状态;
+/// 因此不能根据快照中的状态转移判断「新完成」。fresh 集合是唯一可靠的
+/// 新任务来源,任务完成后立即移除以避免重复通知。
 fn completed_download_titles(
     views: &[TaskView],
-    observed_states: &HashMap<String, TaskState>,
     fresh_task_ids: &mut HashSet<String>,
 ) -> Vec<String> {
     views
         .iter()
         .filter_map(|view| {
-            if !matches!(view.state, TaskState::Completed) {
+            if !matches!(view.state, TaskState::Completed) || !fresh_task_ids.remove(&view.id) {
                 return None;
             }
-            let previous = observed_states.get(&view.id);
-            let was_completed = matches!(previous, Some(TaskState::Completed));
-            let was_observed_active =
-                previous.is_some_and(|state| !matches!(state, TaskState::Completed));
-            let was_added_this_run = fresh_task_ids.contains(&view.id);
-            if was_completed || (!was_observed_active && !was_added_this_run) {
-                return None;
-            }
-            fresh_task_ids.remove(&view.id);
             Some(view.title.clone())
         })
         .collect()
@@ -1054,12 +1063,12 @@ pub fn format_percent(progress: f64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::{HashMap, HashSet};
+    use std::collections::HashSet;
     use std::path::Path;
 
     use super::{
-        TaskState, TaskView, completed_download_titles, is_video_file, magnet_info_hash,
-        safe_task_file_path,
+        TaskState, TaskView, completed_download_titles, filter_startup_views, is_video_file,
+        magnet_info_hash, safe_task_file_path,
     };
 
     fn task(id: &str, title: &str, state: TaskState) -> TaskView {
@@ -1116,33 +1125,70 @@ mod tests {
     #[test]
     fn restored_completed_task_does_not_emit_completion_notification() {
         let views = vec![task("restored", "历史任务", TaskState::Completed)];
-        let observed = HashMap::new();
         let mut fresh = HashSet::new();
 
-        assert!(completed_download_titles(&views, &observed, &mut fresh).is_empty());
+        assert!(completed_download_titles(&views, &mut fresh).is_empty());
     }
 
     #[test]
-    fn active_task_emits_completion_notification() {
-        let views = vec![task("active", "新完成任务", TaskState::Completed)];
-        let observed = HashMap::from([(String::from("active"), TaskState::Downloading)]);
+    fn restored_task_transition_does_not_emit_completion_notification() {
+        let active_views = vec![task("restored", "恢复后完成任务", TaskState::Downloading)];
+        let completed_views = vec![task("restored", "恢复后完成任务", TaskState::Completed)];
         let mut fresh = HashSet::new();
 
+        assert!(completed_download_titles(&active_views, &mut fresh).is_empty());
+        assert!(completed_download_titles(&completed_views, &mut fresh).is_empty());
+    }
+
+    #[test]
+    fn newly_added_task_emits_completion_notification() {
+        let views = vec![task("active", "新完成任务", TaskState::Completed)];
+        let mut fresh = HashSet::from([String::from("active")]);
+
         assert_eq!(
-            completed_download_titles(&views, &observed, &mut fresh),
+            completed_download_titles(&views, &mut fresh),
             vec![String::from("新完成任务")]
         );
+        assert!(fresh.is_empty());
     }
 
     #[test]
     fn newly_added_task_emits_even_if_first_observation_is_completed() {
         let views = vec![task("new", "快速完成任务", TaskState::Completed)];
-        let observed = HashMap::new();
         let mut fresh = HashSet::from([String::from("new")]);
 
         assert_eq!(
-            completed_download_titles(&views, &observed, &mut fresh),
+            completed_download_titles(&views, &mut fresh),
             vec![String::from("快速完成任务")]
+        );
+    }
+
+    #[test]
+    fn startup_filter_hides_restored_active_snapshot_but_keeps_new_task() {
+        let mut views = vec![
+            task(
+                "restoring-initializing",
+                "历史获取任务",
+                TaskState::Initializing,
+            ),
+            task(
+                "restoring-downloading",
+                "历史下载任务",
+                TaskState::Downloading,
+            ),
+            task("restored-completed", "历史完成任务", TaskState::Completed),
+            task("new", "新下载任务", TaskState::Downloading),
+        ];
+        let fresh = HashSet::from([String::from("new")]);
+
+        filter_startup_views(&mut views, &fresh);
+
+        assert_eq!(
+            views
+                .iter()
+                .map(|view| view.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["restored-completed", "new"]
         );
     }
 }

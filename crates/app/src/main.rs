@@ -26,7 +26,7 @@ use gpui_kit::{
 use crate::menu::build_menus;
 use domain::navigation::{HomeFilter, Page, TopSection};
 use domain::{BangumiGroup, BangumiItem, SearchResults, Subscription};
-use downloader::{DownloadCmd, DownloadManager, TaskState};
+use downloader::{DownloadCmd, DownloadManager};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
 use source::SourceError;
@@ -946,13 +946,7 @@ impl MikanPlus {
         self.downloader
             .snapshot()
             .into_iter()
-            .filter(|task| {
-                task.output_dir.as_deref() == Some(dir)
-                    && matches!(
-                        task.state,
-                        downloader::TaskState::Initializing | downloader::TaskState::Downloading
-                    )
-            })
+            .filter(|task| task.output_dir.as_deref() == Some(dir) && task.state.is_active())
             .map(|task| task.title)
             .collect()
     }
@@ -1249,7 +1243,7 @@ impl Render for MikanPlus {
             .downloader
             .snapshot()
             .iter()
-            .filter(|task| matches!(task.state, TaskState::Initializing | TaskState::Downloading))
+            .filter(|task| task.state.is_active())
             .count();
         self.toolbar.update(cx, |toolbar, cx| {
             let changed = toolbar.can_go_back != can_back
@@ -1358,6 +1352,7 @@ impl Render for MikanPlus {
             Page::DownloadObserver => {
                 let page = DownloadObserverPage {
                     tasks: self.downloader.snapshot(),
+                    downloader: self.downloader.clone(),
                 };
                 scroll_page(page, &scroll_handle)
             }
