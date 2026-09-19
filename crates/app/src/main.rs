@@ -28,6 +28,7 @@ use domain::navigation::{HomeFilter, Page, TopSection};
 use domain::{BangumiGroup, BangumiItem, SearchResults, Subscription};
 use downloader::{DownloadCmd, DownloadManager};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::switch::Switch;
 use source::SourceError;
 use storage::{
     load_subgroup_keywords, load_subscriptions, save_subgroup_keywords, save_subscriptions,
@@ -47,6 +48,7 @@ pub type GoBackCallback = Rc<dyn Fn(&mut Window, &mut App)>;
 pub type CardClickCallback = Rc<dyn Fn(&str, Option<u32>, &mut Window, &mut App)>;
 pub type ToggleSubscribeCallback =
     Rc<dyn Fn(u32, u32, Option<&str>, Option<&str>, &mut Window, &mut App)>;
+pub type UnsubscribeConfirmCallback = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 /// 检查某个 (番剧, 字幕组) 是否已订阅
 pub type SubscribedChecker = Rc<dyn Fn(u32, u32) -> bool>;
 
@@ -57,6 +59,17 @@ struct UnsubscribeWarning {
     group_name: String,
     /// 正在下载的剧集标题
     active_titles: Vec<String>,
+}
+
+/// 退订前的二次确认内容。
+#[derive(Clone)]
+struct UnsubscribeConfirmation {
+    bangumi_id: u32,
+    subgroup_id: u32,
+    bangumi_name: String,
+    group_name: String,
+    /// 确认窗口中是否选中移除下载目录和文件
+    remove_downloads: bool,
 }
 
 /// 注册应用级键盘快捷键。
@@ -155,6 +168,10 @@ struct MikanPlus {
     filter_modal: Option<(u32, u32)>,
     /// 退订被拦截时的警告窗口内容(None = 未打开)
     unsubscribe_warning: Option<UnsubscribeWarning>,
+    /// 退订确认窗口内容(None = 未打开)
+    unsubscribe_confirmation: Option<UnsubscribeConfirmation>,
+    /// 正在由下载线程检查退订目录的请求
+    pending_unsubscribe_check: Option<UnsubscribeConfirmation>,
     /// 待处理的退订:(番剧id, 字幕组id, 番剧名, 字幕组名)——等待下载线程回执
     pending_unsub: Option<(u32, u32, String, String)>,
     /// 筛选窗口输入框状态(常驻,打开时预填当前关键词)
@@ -281,7 +298,16 @@ impl MikanPlus {
                                                     downloader::DownloadEvent::UnsubscribeBlocked {
                                                         dir,
                                                         titles,
-                                                    } => mp.handle_unsubscribe_blocked(&dir, titles),
+                                                    } => {
+                                                        mp.handle_unsubscribe_blocked(&dir, titles);
+                                                        cx.notify();
+                                                    }
+                                                    downloader::DownloadEvent::UnsubscribeCheckReady {
+                                                        dir,
+                                                    } => {
+                                                        mp.handle_unsubscribe_check_ready(&dir);
+                                                        cx.notify();
+                                                    }
                                                     downloader::DownloadEvent::UnsubscribeDone {
                                                         dir,
                                                     } => {
@@ -445,6 +471,8 @@ impl MikanPlus {
                 subgroup_keywords: load_subgroup_keywords(),
                 filter_modal: None,
                 unsubscribe_warning: None,
+                unsubscribe_confirmation: None,
+                pending_unsubscribe_check: None,
                 pending_unsub: None,
                 filter_input,
                 downloader: DownloadManager::start(),
@@ -471,6 +499,8 @@ impl MikanPlus {
         self.filter_modal = None;
         // 关闭退订警告窗口(与旧页面上下文无关)
         self.unsubscribe_warning = None;
+        self.unsubscribe_confirmation = None;
+        self.pending_unsubscribe_check = None;
         // 详情页:触发懒加载(未加载时后台获取)
         if let Page::BangumiDetail(name) = &page {
             self.ensure_detail(name.clone(), cx);
@@ -763,7 +793,7 @@ impl MikanPlus {
         cx: &mut Context<Self>,
     ) {
         if self.is_pair_subscribed(bangumi_id, subgroup_id) {
-            self.unsubscribe(bangumi_id, subgroup_id, cx);
+            self.request_unsubscribe(bangumi_id, subgroup_id, cx);
         } else {
             // 封面来源:列表优先,搜索结果兑底(仅存在于搜索结果的番剧也能带封面订阅)
             let cover = self
@@ -787,14 +817,83 @@ impl MikanPlus {
         }
     }
 
+    /// 打开退订确认窗口,不在用户确认前改变订阅或下载内容。
+    fn request_unsubscribe(&mut self, bangumi_id: u32, subgroup_id: u32, cx: &mut Context<Self>) {
+        let Some(sub) = self
+            .subscriptions
+            .iter()
+            .find(|s| s.bangumi_id == bangumi_id && s.subgroup_id == subgroup_id)
+            .cloned()
+        else {
+            return;
+        };
+        let dir = storage::paths::subgroup_download_dir(
+            &storage::load_download_dir(),
+            &sub.bangumi_name,
+            &sub.group_name,
+        );
+        let confirmation = UnsubscribeConfirmation {
+            bangumi_id,
+            subgroup_id,
+            bangumi_name: sub.bangumi_name.clone(),
+            group_name: sub.group_name.clone(),
+            remove_downloads: storage::load_remove_downloads_on_unsubscribe(),
+        };
+        self.pending_unsubscribe_check = Some(confirmation);
+        if let Err(e) = self.downloader.send(DownloadCmd::CheckUnsubscribeDir {
+            dir: dir.clone(),
+            bangumi_name: sub.bangumi_name.clone(),
+            group_name: sub.group_name.clone(),
+        }) {
+            // 下载引擎不可用时只能使用当前快照兜底检查;有活动任务仍优先阻止退订。
+            eprintln!("退订目录检查命令发送失败: {e}");
+            let confirmation = self.pending_unsubscribe_check.take();
+            let active_titles = self.active_download_titles_in_dir(&dir);
+            if let Some(confirmation) = confirmation {
+                if active_titles.is_empty() {
+                    self.unsubscribe_confirmation = Some(confirmation);
+                } else {
+                    self.unsubscribe_warning = Some(UnsubscribeWarning {
+                        bangumi_name: confirmation.bangumi_name,
+                        group_name: confirmation.group_name,
+                        active_titles,
+                    });
+                }
+            }
+            cx.notify();
+        }
+    }
+
+    /// 下载引擎不可用时的本地快照兜底检查。
+    fn active_download_titles_in_dir(&self, dir: &std::path::Path) -> Vec<String> {
+        self.downloader
+            .snapshot()
+            .into_iter()
+            .filter(|task| {
+                task.output_dir.as_deref() == Some(dir)
+                    && matches!(
+                        task.state,
+                        downloader::TaskState::Initializing | downloader::TaskState::Downloading
+                    )
+            })
+            .map(|task| task.title)
+            .collect()
+    }
+
     /// 取消单个字幕组的订阅。
     ///
-    /// 「检查进行中任务 → 取消残留 → 删除目录」整体下沉到下载线程原子执行
-    /// (通过 [`DownloadCmd::CleanupDir`]),避免 UI 线程删目录卡顿与快照竞态;
+    /// 「检查进行中任务 → 按选项保留或删除内容」整体下沉到下载线程原子执行
+    /// (通过 [`DownloadCmd::Unsubscribe`]),避免 UI 线程删目录卡顿与快照竞态;
     /// 结果经 [`downloader::DownloadEvent`] 回执:
     /// - 有进行中任务 → 阻断,弹出警告窗口
     /// - 清理完成 → 移除订阅记录与筛选关键词
-    fn unsubscribe(&mut self, bangumi_id: u32, subgroup_id: u32, cx: &mut Context<Self>) {
+    fn unsubscribe(
+        &mut self,
+        bangumi_id: u32,
+        subgroup_id: u32,
+        remove_downloads: bool,
+        cx: &mut Context<Self>,
+    ) {
         let sub = self
             .subscriptions
             .iter()
@@ -816,22 +915,70 @@ impl MikanPlus {
             sub.bangumi_name.clone(),
             sub.group_name.clone(),
         ));
-        if let Err(e) = self.downloader.send(DownloadCmd::CleanupDir {
+        if let Err(e) = self.downloader.send(DownloadCmd::Unsubscribe {
             dir: dir.clone(),
             bangumi_name: sub.bangumi_name.clone(),
             group_name: sub.group_name.clone(),
+            remove_downloads,
         }) {
-            // 引擎不可用:直接本地完成退订(引擎已死,不存在并发写)
+            // 引擎不可用时先用当前快照兜底;即使选择保留文件,有活动任务也不能退订。
             eprintln!("退订清理命令发送失败: {e}");
             self.pending_unsub = None;
-            let _ = std::fs::remove_dir_all(&dir);
-            self.finish_unsubscribe(bangumi_id, subgroup_id);
+            let active_titles = self.active_download_titles_in_dir(&dir);
+            if active_titles.is_empty() {
+                if remove_downloads {
+                    let _ = std::fs::remove_dir_all(&dir);
+                }
+                self.finish_unsubscribe(bangumi_id, subgroup_id);
+            } else {
+                self.unsubscribe_warning = Some(UnsubscribeWarning {
+                    bangumi_name: sub.bangumi_name,
+                    group_name: sub.group_name,
+                    active_titles,
+                });
+            }
             cx.notify();
         }
     }
 
+    /// 应用退订确认结果。
+    fn confirm_unsubscribe(&mut self, remove_downloads: bool, cx: &mut Context<Self>) {
+        let Some(confirmation) = self.unsubscribe_confirmation.take() else {
+            return;
+        };
+        // 最终确认仍由下载 actor 原子复查活动任务,即使用户在窗口打开期间开始下载,
+        // 也不能绕过「有下载时不允许退订」的规则。
+        self.unsubscribe(
+            confirmation.bangumi_id,
+            confirmation.subgroup_id,
+            remove_downloads,
+            cx,
+        );
+        // 确认窗口需要在点击确认后立即关闭;若清理异步进行,订阅状态等回执再更新。
+        cx.notify();
+    }
+
     /// 下载线程回执:退订被阻断(该目录有进行中的任务)→ 弹出警告窗口
     fn handle_unsubscribe_blocked(&mut self, dir: &std::path::Path, titles: Vec<String>) {
+        // 初次检查优先于退订确认窗口:有活动任务时直接显示阻断警告。
+        if let Some(confirmation) = self.pending_unsubscribe_check.as_ref() {
+            let expected = storage::paths::subgroup_download_dir(
+                &storage::load_download_dir(),
+                &confirmation.bangumi_name,
+                &confirmation.group_name,
+            );
+            if expected == dir {
+                let confirmation = self.pending_unsubscribe_check.take().unwrap();
+                self.unsubscribe_warning = Some(UnsubscribeWarning {
+                    bangumi_name: confirmation.bangumi_name,
+                    group_name: confirmation.group_name,
+                    active_titles: titles,
+                });
+                self.unsubscribe_confirmation = None;
+                return;
+            }
+        }
+
         let Some((_, _, bangumi_name, group_name)) = &self.pending_unsub else {
             return;
         };
@@ -849,6 +996,22 @@ impl MikanPlus {
             active_titles: titles,
         });
         self.pending_unsub = None;
+    }
+
+    /// 下载线程回执:初次目录检查通过,现在才显示退订确认窗口。
+    fn handle_unsubscribe_check_ready(&mut self, dir: &std::path::Path) {
+        let Some(confirmation) = self.pending_unsubscribe_check.as_ref() else {
+            return;
+        };
+        let expected = storage::paths::subgroup_download_dir(
+            &storage::load_download_dir(),
+            &confirmation.bangumi_name,
+            &confirmation.group_name,
+        );
+        if expected == dir {
+            let confirmation = self.pending_unsubscribe_check.take().unwrap();
+            self.unsubscribe_confirmation = Some(confirmation);
+        }
     }
 
     /// 下载线程回执:目录清理完成 → 移除订阅记录与筛选关键词
@@ -978,6 +1141,20 @@ impl MikanPlus {
         self.unsubscribe_warning = None;
         cx.notify();
     }
+
+    /// 关闭退订确认窗口(取消退订)。
+    fn close_unsubscribe_confirmation(&mut self, cx: &mut Context<Self>) {
+        self.unsubscribe_confirmation = None;
+        cx.notify();
+    }
+
+    /// 更新退订确认窗口中的临时清理选项。
+    fn set_unsubscribe_remove_downloads(&mut self, remove: bool, cx: &mut Context<Self>) {
+        if let Some(confirmation) = self.unsubscribe_confirmation.as_mut() {
+            confirmation.remove_downloads = remove;
+            cx.notify();
+        }
+    }
 }
 
 impl Render for MikanPlus {
@@ -1063,8 +1240,7 @@ impl Render for MikanPlus {
                     let entity = cx.entity().clone();
                     Rc::new(move |bid, sid, _window, app: &mut App| {
                         entity.update(app, |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
-                            mp.unsubscribe(bid, sid, cx);
-                            cx.notify();
+                            mp.request_unsubscribe(bid, sid, cx);
                         });
                     })
                 };
@@ -1337,6 +1513,45 @@ impl Render for MikanPlus {
             })
         };
 
+        // 退订确认窗口:二次确认,并允许本次决定是否清理下载目录和文件
+        let confirmation_modal_view: Option<gpui_kit::AnyElement> = {
+            let entity = cx.entity().clone();
+            self.unsubscribe_confirmation.clone().map(|confirmation| {
+                let on_cancel: GoBackCallback = {
+                    let entity = entity.clone();
+                    Rc::new(move |_window, app| {
+                        entity.update(app, |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
+                            mp.close_unsubscribe_confirmation(cx);
+                        });
+                    })
+                };
+                let on_confirm: UnsubscribeConfirmCallback = {
+                    let entity = entity.clone();
+                    Rc::new(move |remove_downloads, _window, app| {
+                        entity.update(app, |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
+                            mp.confirm_unsubscribe(remove_downloads, cx);
+                        });
+                    })
+                };
+                let on_toggle_remove: UnsubscribeConfirmCallback = {
+                    let entity = entity.clone();
+                    Rc::new(move |remove_downloads, _window, app| {
+                        entity.update(app, |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
+                            mp.set_unsubscribe_remove_downloads(remove_downloads, cx);
+                        });
+                    })
+                };
+                render_unsubscribe_confirmation(
+                    &theme,
+                    &confirmation,
+                    on_cancel,
+                    on_confirm,
+                    on_toggle_remove,
+                )
+                .into_any_element()
+            })
+        };
+
         // ---- 布局 ----
         //
         // 重要:gpui 0.2.2(crates.io 发布版)中,flex 的
@@ -1375,6 +1590,8 @@ impl Render for MikanPlus {
             .when_some(filter_modal_view, |this, modal| this.child(modal))
             // 退订警告窗口(居中浮动,覆盖在内容层之上)
             .when_some(warning_modal_view, |this, modal| this.child(modal))
+            // 退订确认窗口(居中浮动,覆盖在内容层之上)
+            .when_some(confirmation_modal_view, |this, modal| this.child(modal))
             // ---- 动作处理 ----
             .on_action(cx.listener(|this, _: &GoHome, _window, cx| {
                 this.navigate_to(Page::Home(HomeFilter::Today), cx);
@@ -1420,6 +1637,7 @@ impl Render for MikanPlus {
             .on_action(cx.listener(|this, _: &CloseFilterModal, _window, cx| {
                 this.close_filter_modal(cx);
                 this.close_unsubscribe_warning(cx);
+                this.close_unsubscribe_confirmation(cx);
             }))
             .on_action(cx.listener(|_this, _: &ToggleTheme, window, cx| {
                 let dark = gpui_kit::component::theme::Theme::global(cx).mode
@@ -1616,6 +1834,170 @@ fn render_unsubscribe_warning(
                                     move |_, window, app| on_close(window, app)
                                 })
                                 .child("知道了"),
+                        ),
+                ),
+        )
+}
+
+/// 居中浮动确认窗口:确认退订,并明确询问是否删除该字幕组的下载目录和文件。
+fn render_unsubscribe_confirmation(
+    theme: &gpui_kit::component::theme::Theme,
+    confirmation: &UnsubscribeConfirmation,
+    on_cancel: GoBackCallback,
+    on_confirm: UnsubscribeConfirmCallback,
+    on_toggle_remove: UnsubscribeConfirmCallback,
+) -> impl IntoElement {
+    let remove_downloads = confirmation.remove_downloads;
+    let confirm_label = if remove_downloads {
+        "退订并移除"
+    } else {
+        "确认退订"
+    };
+
+    gpui_kit::div()
+        .id("unsubscribe-confirmation-modal")
+        .absolute()
+        .inset_0()
+        .bg(gpui_kit::hsla(0., 0., 0., 0.4))
+        .flex()
+        .items_center()
+        .justify_center()
+        .on_click({
+            let on_cancel = on_cancel.clone();
+            move |_, window, app| on_cancel(window, app)
+        })
+        .child(
+            gpui_kit::div()
+                .id("unsubscribe-confirmation-card")
+                .w(px(460.))
+                .rounded(px(12.))
+                .border_1()
+                .border_color(theme.border)
+                .bg(theme.background)
+                .shadow_lg()
+                .p(px(20.))
+                .flex()
+                .flex_col()
+                .on_click(move |_, _, app: &mut App| {
+                    app.stop_propagation();
+                })
+                .child(
+                    gpui_kit::div()
+                        .flex()
+                        .items_center()
+                        .gap(px(8.))
+                        .child(ui::icons::icon("info", 16.).text_color(theme.warning))
+                        .child(
+                            gpui_kit::div()
+                                .text_base()
+                                .font_semibold()
+                                .text_color(theme.foreground)
+                                .child("确认取消订阅"),
+                        ),
+                )
+                .child(
+                    gpui_kit::div()
+                        .mt(px(10.))
+                        .text_sm()
+                        .text_color(theme.foreground)
+                        .child(format!(
+                            "确定要取消「{} - {}」的订阅吗?",
+                            confirmation.bangumi_name, confirmation.group_name
+                        )),
+                )
+                .child(
+                    gpui_kit::div()
+                        .mt(px(14.))
+                        .rounded(px(8.))
+                        .border_1()
+                        .border_color(theme.border)
+                        .px(px(12.))
+                        .py(px(10.))
+                        .flex()
+                        .items_center()
+                        .justify_between()
+                        .gap(px(12.))
+                        .child(
+                            gpui_kit::div()
+                                .flex_1()
+                                .flex()
+                                .flex_col()
+                                .gap(px(2.))
+                                .child(
+                                    gpui_kit::div()
+                                        .text_sm()
+                                        .text_color(theme.foreground)
+                                        .child("同时移除下载目录和文件"),
+                                )
+                                .child(
+                                    gpui_kit::div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child(if remove_downloads {
+                                            "已选择移除该字幕组的下载内容"
+                                        } else {
+                                            "默认保留下载任务和已下载内容"
+                                        }),
+                                ),
+                        )
+                        .child(
+                            Switch::new("unsubscribe-remove-downloads")
+                                .checked(remove_downloads)
+                                .on_click(move |checked, window, app| {
+                                    on_toggle_remove(*checked, window, app);
+                                }),
+                        ),
+                )
+                .child(
+                    gpui_kit::div()
+                        .mt(px(18.))
+                        .flex()
+                        .justify_end()
+                        .gap(px(8.))
+                        .child(
+                            gpui_kit::div()
+                                .id("unsubscribe-confirmation-cancel")
+                                .px(px(14.))
+                                .py(px(6.))
+                                .rounded(px(6.))
+                                .border_1()
+                                .border_color(theme.border)
+                                .text_sm()
+                                .text_color(theme.foreground)
+                                .cursor_pointer()
+                                .hover(|style| style.bg(theme.list_hover))
+                                .on_click({
+                                    let on_cancel = on_cancel.clone();
+                                    move |_, window, app| on_cancel(window, app)
+                                })
+                                .child("取消"),
+                        )
+                        .child(
+                            gpui_kit::div()
+                                .id("unsubscribe-confirmation-confirm")
+                                .px(px(14.))
+                                .py(px(6.))
+                                .rounded(px(6.))
+                                .text_sm()
+                                .font_semibold()
+                                .text_color(if remove_downloads {
+                                    theme.danger_foreground
+                                } else {
+                                    theme.primary_foreground
+                                })
+                                .cursor_pointer()
+                                .when(remove_downloads, |this| {
+                                    this.bg(theme.danger)
+                                        .hover(|style| style.bg(theme.danger_hover))
+                                })
+                                .when(!remove_downloads, |this| {
+                                    this.bg(theme.primary)
+                                        .hover(|style| style.bg(theme.primary_hover))
+                                })
+                                .on_click(move |_, window, app| {
+                                    on_confirm(remove_downloads, window, app);
+                                })
+                                .child(confirm_label),
                         ),
                 ),
         )

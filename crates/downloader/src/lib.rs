@@ -164,11 +164,18 @@ pub enum DownloadCmd {
     },
     /// 取消任务(删除已下载文件)
     Cancel { id: String },
-    /// 清理订阅目录(退订):检查进行中任务 → 有则回执阻断,无则取消残留任务并删除目录
-    CleanupDir {
+    /// 退订前检查目录中是否有正在下载的任务,不修改任何数据。
+    CheckUnsubscribeDir {
         dir: PathBuf,
         bangumi_name: String,
         group_name: String,
+    },
+    /// 完成退订:原子检查进行中任务,按选项决定是否清理目录和文件。
+    Unsubscribe {
+        dir: PathBuf,
+        bangumi_name: String,
+        group_name: String,
+        remove_downloads: bool,
     },
 }
 
@@ -234,8 +241,10 @@ pub enum DownloadEvent {
     AddFailed { title: String, error: DownloadError },
     /// 下载引擎启动失败(后台线程退出,所有下载功能不可用)
     EngineFailed { error: DownloadError },
-    /// 退订目录清理被阻断:该目录仍有进行中的任务
+    /// 退订被阻断:该目录仍有进行中的任务
     UnsubscribeBlocked { dir: PathBuf, titles: Vec<String> },
+    /// 退订前检查通过,UI 可以显示最终确认窗口
+    UnsubscribeCheckReady { dir: PathBuf },
     /// 退订目录清理完成(目录已删除,UI 可移除订阅记录)
     UnsubscribeDone { dir: PathBuf },
 }
@@ -343,7 +352,7 @@ async fn run_loop(
                         handle_cmd(&session, &meta_dir, cmd).await;
                     });
                 } else {
-                    // 取消和目录清理保持 actor 顺序，不与彼此并发。
+                    // 取消和退订检查/清理保持 actor 顺序，不与彼此并发。
                     handle_cmd(&session, &meta_dir, cmd).await;
                 }
             }
@@ -351,6 +360,54 @@ async fn run_loop(
         }
     }
     session.stop().await;
+}
+
+/// 收集指定下载目录中仍在进行的任务标题。
+///
+/// 同时检查已经写入 librqbit 的任务和 metadata 获取中的 pending 任务,
+/// 避免退订确认窗口打开期间漏掉刚开始的下载。
+fn active_titles_for_dir(session: &Arc<Session>, meta_dir: &Path, dir: &Path) -> Vec<String> {
+    let mut metas: Vec<(String, TaskMeta)> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(meta_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|e| e == "json")
+                && let Some(stem) = path.file_stem().and_then(|s| s.to_str())
+                && let Ok(text) = std::fs::read_to_string(&path)
+                && let Ok(meta) = serde_json::from_str::<TaskMeta>(&text)
+                && meta.output_dir == dir
+            {
+                metas.push((stem.to_string(), meta));
+            }
+        }
+    }
+
+    let mut active = Vec::new();
+    for (hash, meta) in &metas {
+        let in_session = session.with_torrents(|it| {
+            let mut found = false;
+            for (_, handle) in it {
+                if handle.info_hash().as_string().to_lowercase() == *hash
+                    && !handle.stats().finished
+                {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        });
+        if in_session {
+            active.push(meta.title.clone());
+        }
+    }
+    let pendings = PENDING.lock().unwrap().clone().unwrap_or_default();
+    active.extend(
+        pendings
+            .values()
+            .filter(|pending| pending.output_dir == dir)
+            .map(|pending| pending.title.clone()),
+    );
+    active
 }
 
 /// 处理一条下载命令
@@ -472,6 +529,23 @@ async fn handle_cmd(session: &Arc<Session>, meta_dir: &Path, cmd: DownloadCmd) {
                 }
             }
         }
+        DownloadCmd::CheckUnsubscribeDir {
+            dir,
+            bangumi_name,
+            group_name,
+        } => {
+            let active = active_titles_for_dir(session, meta_dir, &dir);
+            if active.is_empty() {
+                push_event(DownloadEvent::UnsubscribeCheckReady { dir });
+            } else {
+                let count = active.len();
+                eprintln!("退订「{bangumi_name} - {group_name}」被阻断:{count} 个剧集正在下载");
+                push_event(DownloadEvent::UnsubscribeBlocked {
+                    dir,
+                    titles: active,
+                });
+            }
+        }
         DownloadCmd::Cancel { id } => {
             // 先读元信息(取消日志需要标题)
             let meta_path = meta_dir.join(format!("{id}.json"));
@@ -501,10 +575,11 @@ async fn handle_cmd(session: &Arc<Session>, meta_dir: &Path, cmd: DownloadCmd) {
                 eprintln!("「{}」已取消,文件已删除", meta.title);
             }
         }
-        DownloadCmd::CleanupDir {
+        DownloadCmd::Unsubscribe {
             dir,
             bangumi_name,
             group_name,
+            remove_downloads,
         } => {
             // 退订清理:检查与取消、删目录在同一线程内原子完成,
             // 不依赖 UI 侧的周期快照(避免「刚点下载就退订」的竞态窗口)。
@@ -560,6 +635,13 @@ async fn handle_cmd(session: &Arc<Session>, meta_dir: &Path, cmd: DownloadCmd) {
                     dir: dir.clone(),
                     titles: active,
                 });
+                return;
+            }
+
+            if !remove_downloads {
+                // 用户选择保留下载内容:通过同一 actor 的检查后放行退订,
+                // 不取消任务、不删除元信息、不触碰目录。
+                push_event(DownloadEvent::UnsubscribeDone { dir });
                 return;
             }
 
