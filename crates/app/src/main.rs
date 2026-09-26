@@ -5,6 +5,7 @@
     windows_subsystem = "windows"
 )]
 
+#[cfg(target_os = "macos")]
 mod menu;
 
 use std::borrow::Cow;
@@ -12,6 +13,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::path::PathBuf;
 use std::rc::Rc;
+#[cfg(target_os = "macos")]
+use std::sync::atomic::AtomicBool;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -23,6 +26,7 @@ use gpui_kit::{
     WindowOptions, prelude::*, px,
 };
 
+#[cfg(target_os = "macos")]
 use crate::menu::build_menus;
 use domain::navigation::{HomeFilter, Page, TopSection};
 use domain::{BangumiGroup, BangumiItem, SearchResults, Subscription};
@@ -73,31 +77,126 @@ struct UnsubscribeConfirmation {
 }
 
 /// 注册应用级键盘快捷键。
+///
+/// 快捷键只面向 macOS:Windows/Linux 不提供应用级快捷键(Linux 侧快捷键交给
+/// 窗口管理器 / display manager,Windows 用户也很少使用快捷键)。
+/// 「Esc 关闭弹层」属于跨平台通用交互,不随平台快捷键一起关闭。
 fn register_keybindings(cx: &mut App) {
     use gpui_kit::KeyBinding;
-    cx.bind_keys([
-        KeyBinding::new("cmd-1", GoHome, None),
-        KeyBinding::new("cmd-2", GoSubscription, None),
-        KeyBinding::new("cmd-4", GoMonday, None),
-        KeyBinding::new("cmd-5", GoTuesday, None),
-        KeyBinding::new("cmd-6", GoWednesday, None),
-        KeyBinding::new("cmd-7", GoThursday, None),
-        KeyBinding::new("cmd-8", GoFriday, None),
-        KeyBinding::new("cmd-9", GoSaturday, None),
-        KeyBinding::new("cmd-0", GoSunday, None),
-        KeyBinding::new("cmd-shift-m", GoMovies, None),
-        KeyBinding::new("cmd-,", GoSettings, None),
-        KeyBinding::new("cmd-[", GoBack, None),
-        KeyBinding::new("cmd-f", FocusSearch, None),
-        KeyBinding::new("cmd-shift-l", ToggleTheme, None),
-        KeyBinding::new("escape", CloseFilterModal, None),
-        KeyBinding::new("cmd-q", QuitApp, None),
-        KeyBinding::new("cmd-w", CloseWindow, None),
-        KeyBinding::new("cmd-m", MinimizeWindow, None),
-        KeyBinding::new("cmd-ctrl-f", ToggleFullscreen, None),
-        KeyBinding::new("cmd-h", HideApp, None),
-        KeyBinding::new("cmd-alt-h", HideOthers, None),
-    ]);
+
+    // 跨平台:Esc 关闭筛选窗口 / 退订弹窗
+    cx.bind_keys([KeyBinding::new("escape", CloseFilterModal, None)]);
+
+    // macOS:标准菜单快捷键(App 菜单 / 文件 / 视图 / 窗口)
+    #[cfg(target_os = "macos")]
+    {
+        cx.bind_keys([
+            KeyBinding::new("cmd-,", GoSettings, None),
+            KeyBinding::new("cmd-h", HideApp, None),
+            KeyBinding::new("cmd-alt-h", HideOthers, None),
+            KeyBinding::new("cmd-q", QuitApp, None),
+            KeyBinding::new("cmd-w", CloseWindow, None),
+            KeyBinding::new("cmd-m", MinimizeWindow, None),
+            KeyBinding::new("cmd-ctrl-f", ToggleFullscreen, None),
+        ]);
+    }
+}
+
+/// 注册菜单动作的全局监听器。
+///
+/// macOS 菜单项的启用状态由 `App::is_action_available` 决定:只有当该动作出现在
+/// 当前焦点分发路径上,或存在全局监听器时才可用。应用没有默认聚焦的元素,
+/// 因此必须把菜单动作注册到这里,否则所有菜单项(及其快捷键)都会被置灰。
+///
+/// 菜单动作是在窗口 `update` 内派发的,此时不能再 `update` 同一窗口(窗口已被
+/// 取出会静默失败),所以涉及窗口/视图的操作统一用 `cx.defer` 延后到本次更新结束。
+///
+/// 菜单动作只在 macOS 存在(gpui 仅在 macOS 渲染原生菜单栏,Windows/Linux 没有菜单
+/// 也没有快捷键),因此这部分只在 macOS 注册,避免依赖未实现的平台 API。
+fn register_app_actions(cx: &mut App) {
+    // 跨平台:Esc 关闭弹层(通用交互,不随平台菜单)
+    cx.on_action(|_: &CloseFilterModal, cx: &mut App| {
+        cx.defer(|cx| {
+            let _ = with_mikan(cx, |this, _window, cx| {
+                this.close_filter_modal(cx);
+                this.close_unsubscribe_warning(cx);
+                this.close_unsubscribe_confirmation(cx);
+            });
+        });
+    });
+
+    // macOS:原生菜单栏动作
+    #[cfg(target_os = "macos")]
+    {
+        cx.on_action(|_: &QuitApp, cx: &mut App| cx.quit());
+        cx.on_action(|_: &HideApp, cx: &mut App| cx.hide());
+        cx.on_action(|_: &HideOthers, cx: &mut App| cx.hide_other_apps());
+        cx.on_action(|_: &ShowAllApps, cx: &mut App| cx.unhide_other_apps());
+
+        cx.on_action(|_: &CloseWindow, cx: &mut App| {
+            cx.defer(|cx| with_active_window(cx, |window| window.remove_window()));
+        });
+        cx.on_action(|_: &MinimizeWindow, cx: &mut App| {
+            cx.defer(|cx| with_active_window(cx, |window| window.minimize_window()));
+        });
+        cx.on_action(|_: &ZoomWindow, cx: &mut App| {
+            cx.defer(|cx| with_active_window(cx, |window| window.zoom_window()));
+        });
+        cx.on_action(|_: &ToggleFullscreen, cx: &mut App| {
+            cx.defer(|cx| with_active_window(cx, |window| window.toggle_fullscreen()));
+        });
+
+        cx.on_action(|_: &GoSettings, cx: &mut App| {
+            cx.defer(|cx| {
+                let _ = with_mikan(cx, |this, _window, cx| this.navigate_to(Page::Settings, cx));
+            });
+        });
+        cx.on_action(|_: &AboutMikan, cx: &mut App| {
+            // 打开设置页(包含关于信息)
+            cx.defer(|cx| {
+                let _ = with_mikan(cx, |this, _window, cx| this.navigate_to(Page::Settings, cx));
+            });
+        });
+    }
+}
+
+/// 在活动窗口上执行操作(无窗口时忽略)。仅供 macOS 菜单动作使用。
+#[cfg(target_os = "macos")]
+fn with_active_window(cx: &mut App, f: impl FnOnce(&mut Window)) {
+    if let Some(handle) = cx.active_window() {
+        let _ = handle.update(cx, |_, window, _| f(window));
+    }
+}
+
+/// 在活动窗口的 `MikanPlus` 视图上执行操作(无窗口或视图类型不符时忽略)。
+fn with_mikan<R>(
+    cx: &mut App,
+    f: impl FnOnce(&mut MikanPlus, &mut Window, &mut Context<MikanPlus>) -> R,
+) -> Option<R> {
+    let handle = cx.active_window()?;
+    handle
+        .update(cx, |root_view, window, cx| {
+            let root = root_view.downcast::<gpui_kit::component::Root>().ok()?;
+            let view = root.read(cx).view().clone().downcast::<MikanPlus>().ok()?;
+            Some(view.update(cx, |this, cx| f(this, window, cx)))
+        })
+        .ok()
+        .flatten()
+}
+
+/// 窗口当前是否处于全屏(用于同步菜单文案)。
+#[cfg(target_os = "macos")]
+static FULLSCREEN: AtomicBool = AtomicBool::new(false);
+
+/// 全屏状态变化时重建菜单栏,切换「进入全屏 / 退出全屏」文案。
+///
+/// gpui 没有全屏状态变更回调,由轮询循环每 500ms 调用一次;仅在状态真正变化时重建。
+#[cfg(target_os = "macos")]
+fn sync_fullscreen_menu(window: &mut Window, cx: &mut App) {
+    let fullscreen = window.is_fullscreen();
+    if FULLSCREEN.swap(fullscreen, Ordering::Relaxed) != fullscreen {
+        cx.set_menus(build_menus(fullscreen));
+    }
 }
 
 /// 列表页加载状态
@@ -243,6 +342,13 @@ impl MikanPlus {
                             let Some(entity) = this.upgrade() else {
                                 break;
                             };
+                            // 全屏状态变化时同步菜单文案(「进入全屏」/「退出全屏」)
+                            #[cfg(target_os = "macos")]
+                            entity.update(&mut cx, |mp, cx| {
+                                let _ = mp
+                                    .window_handle
+                                    .update(cx, |_, window, cx| sync_fullscreen_menu(window, cx));
+                            });
                             let iv = source::network::image_version();
                             let lv = LOAD_VERSION.load(Ordering::Relaxed);
                             let dv = downloader::snapshot_version();
@@ -575,15 +681,6 @@ impl MikanPlus {
         if !query.is_empty() {
             self.navigate_to(Page::SearchResult(query), cx);
         }
-    }
-
-    /// 打开搜索界面并聚焦输入框。
-    fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.navigate_to(Page::SearchResult(String::new()), cx);
-        self.search_input.update(cx, |state, cx| {
-            state.set_value(String::new(), window, cx);
-            state.focus(window, cx);
-        });
     }
 
     /// 加载番剧列表:优先磁盘缓存(30 分钟 TTL),未命中才在后台线程请求网络。
@@ -1711,106 +1808,6 @@ impl Render for MikanPlus {
             .when_some(warning_modal_view, |this, modal| this.child(modal))
             // 退订确认窗口(居中浮动,覆盖在内容层之上)
             .when_some(confirmation_modal_view, |this, modal| this.child(modal))
-            // ---- 动作处理 ----
-            .on_action(cx.listener(|this, _: &GoHome, _window, cx| {
-                this.navigate_to(Page::Home(HomeFilter::Today), cx);
-            }))
-            .on_action(cx.listener(|this, _: &GoSubscription, _window, cx| {
-                this.navigate_to(Page::Subscription, cx);
-            }))
-            .on_action(cx.listener(|this, _: &GoMonday, _window, cx| {
-                this.navigate_to(Page::Home(HomeFilter::Weekday(0)), cx);
-            }))
-            .on_action(cx.listener(|this, _: &GoTuesday, _window, cx| {
-                this.navigate_to(Page::Home(HomeFilter::Weekday(1)), cx);
-            }))
-            .on_action(cx.listener(|this, _: &GoWednesday, _window, cx| {
-                this.navigate_to(Page::Home(HomeFilter::Weekday(2)), cx);
-            }))
-            .on_action(cx.listener(|this, _: &GoThursday, _window, cx| {
-                this.navigate_to(Page::Home(HomeFilter::Weekday(3)), cx);
-            }))
-            .on_action(cx.listener(|this, _: &GoFriday, _window, cx| {
-                this.navigate_to(Page::Home(HomeFilter::Weekday(4)), cx);
-            }))
-            .on_action(cx.listener(|this, _: &GoSaturday, _window, cx| {
-                this.navigate_to(Page::Home(HomeFilter::Weekday(5)), cx);
-            }))
-            .on_action(cx.listener(|this, _: &GoSunday, _window, cx| {
-                this.navigate_to(Page::Home(HomeFilter::Weekday(6)), cx);
-            }))
-            .on_action(cx.listener(|this, _: &GoMovies, _window, cx| {
-                this.navigate_to(Page::Home(HomeFilter::Movies), cx);
-            }))
-            .on_action(cx.listener(|this, _: &GoSettings, _window, cx| {
-                this.navigate_to(Page::Settings, cx);
-            }))
-            .on_action(cx.listener(|this, _: &GoBack, _window, cx| {
-                this.go_back(cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusSearch, window, cx| {
-                this.open_search(window, cx);
-            }))
-            .on_action(cx.listener(|this, _: &CloseFilterModal, _window, cx| {
-                this.close_filter_modal(cx);
-                this.close_unsubscribe_warning(cx);
-                this.close_unsubscribe_confirmation(cx);
-            }))
-            .on_action(cx.listener(|_this, _: &ToggleTheme, window, cx| {
-                let dark = gpui_kit::component::theme::Theme::global(cx).mode
-                    == gpui_kit::component::theme::ThemeMode::Dark;
-                let mode = if dark {
-                    gpui_kit::component::theme::ThemeMode::Light
-                } else {
-                    gpui_kit::component::theme::ThemeMode::Dark
-                };
-                app_theme::set_mode(mode, Some(window), cx);
-            }))
-            .on_action(cx.listener(|_this, _: &LightMode, window, cx| {
-                app_theme::set_mode(
-                    gpui_kit::component::theme::ThemeMode::Light,
-                    Some(window),
-                    cx,
-                );
-            }))
-            .on_action(cx.listener(|_this, _: &DarkMode, window, cx| {
-                app_theme::set_mode(
-                    gpui_kit::component::theme::ThemeMode::Dark,
-                    Some(window),
-                    cx,
-                );
-            }))
-            .on_action(cx.listener(|_this, _: &AboutMikan, _window, cx| {
-                // 打开设置页(包含关于信息)
-                let entity = cx.entity().clone();
-                entity.update(cx, |mp: &mut MikanPlus, cx| {
-                    mp.navigate_to(Page::Settings, cx);
-                });
-            }))
-            .on_action(cx.listener(|_this, _: &HideApp, _window, cx| {
-                cx.hide();
-            }))
-            .on_action(cx.listener(|_this, _: &HideOthers, _window, cx| {
-                cx.hide_other_apps();
-            }))
-            .on_action(cx.listener(|_this, _: &QuitApp, _window, cx| {
-                cx.quit();
-            }))
-            .on_action(cx.listener(|_this, _: &CloseWindow, window, _cx| {
-                window.remove_window();
-            }))
-            .on_action(cx.listener(|_this, _: &ZoomWindow, window, _cx| {
-                window.zoom_window();
-            }))
-            .on_action(cx.listener(|_this, _: &MinimizeWindow, window, _cx| {
-                window.minimize_window();
-            }))
-            .on_action(cx.listener(|_this, _: &ToggleFullscreen, window, _cx| {
-                window.toggle_fullscreen();
-            }))
-            .on_action(cx.listener(|_this, _: &OpenMikanWebsite, _window, _cx| {
-                let _ = storage::paths::open_url(source::network::base_url());
-            }))
             // 应用内通知层(右上角弹出,Root 不会自动渲染,需手动挂载)
             .when_some(
                 gpui_kit::component::Root::render_notification_layer(window, cx),
@@ -2384,8 +2381,11 @@ fn main() {
 
         register_keybindings(cx);
 
-        // 应用菜单栏
-        cx.set_menus(build_menus());
+        register_app_actions(cx);
+
+        // 应用菜单栏(仅 macOS 有原生菜单栏)
+        #[cfg(target_os = "macos")]
+        cx.set_menus(build_menus(false));
 
         open_main_window(cx);
     });

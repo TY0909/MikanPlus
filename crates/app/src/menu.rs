@@ -1,19 +1,20 @@
 //! 应用菜单栏。
 //!
-//! 遵循 macOS 人机界面指南:包含 App / 文件 / 编辑 / 视图 / 前往 / 窗口 / 帮助
-//! 标准菜单结构。菜单项的键盘快捷键由 keymap 自动解析(见 `main.rs` 中的绑定)。
+//! 只保留 macOS 标准菜单结构:App / 文件 / 编辑 / 视图 / 窗口。
+//! 菜单项的键盘快捷键由 keymap 自动解析(见 `main.rs` 中的绑定)。
 
-use gpui_kit::{Menu, MenuItem, OsAction};
+use gpui_kit::{Menu, MenuItem, OsAction, SystemMenuType};
 
 use ui::actions::{
-    AboutMikan, CloseWindow, DarkMode, GoBack, GoFriday, GoHome, GoMonday, GoMovies, GoSaturday,
-    GoSettings, GoSubscription, GoSunday, GoThursday, GoTuesday, GoWednesday, HideApp, HideOthers,
-    LightMode, MinimizeWindow, OpenMikanWebsite, QuitApp, ToggleFullscreen, ToggleTheme,
-    ZoomWindow,
+    AboutMikan, CloseWindow, GoSettings, HideApp, HideOthers, MinimizeWindow, QuitApp, ShowAllApps,
+    ToggleFullscreen, ZoomWindow,
 };
 
 /// 构建完整的应用菜单栏。
-pub fn build_menus() -> Vec<Menu> {
+///
+/// `fullscreen` 表示窗口当前是否处于全屏,用于切换「视图」菜单中的文案
+/// (进入全屏 / 退出全屏),遵循 macOS 动态菜单标题的惯例。
+pub fn build_menus(fullscreen: bool) -> Vec<Menu> {
     vec![
         // ---- App 菜单 ----
         Menu {
@@ -24,8 +25,11 @@ pub fn build_menus() -> Vec<Menu> {
                 MenuItem::separator(),
                 MenuItem::action("设置…", GoSettings),
                 MenuItem::separator(),
+                MenuItem::os_submenu("服务", SystemMenuType::Services),
+                MenuItem::separator(),
                 MenuItem::action("隐藏 MikanPlus", HideApp),
                 MenuItem::action("隐藏其他", HideOthers),
+                MenuItem::action("全部显示", ShowAllApps),
                 MenuItem::separator(),
                 MenuItem::action("退出 MikanPlus", QuitApp),
             ],
@@ -38,7 +42,7 @@ pub fn build_menus() -> Vec<Menu> {
         },
         // ---- 编辑菜单 ----
         // 直接派发 gpui-component 输入框原生支持的编辑动作
-        // (剪切/拷贝/粘贴/撤销/重做/全选,作用于当前聚焦的输入框,
+        // (剪切/拷贝/粘贴/全选,作用于当前聚焦的输入框,
         // 自带系统剪贴板与快捷键处理)
         Menu {
             name: "编辑".into(),
@@ -53,42 +57,20 @@ pub fn build_menus() -> Vec<Menu> {
                     gpui_kit::component::input::SelectAll,
                     OsAction::SelectAll,
                 ),
-                MenuItem::action("撤销", gpui_kit::component::input::Undo),
-                MenuItem::action("重做", gpui_kit::component::input::Redo),
             ],
         },
         // ---- 视图菜单 ----
         Menu {
             name: "视图".into(),
             disabled: false,
-            items: vec![
-                MenuItem::action("浅色模式", LightMode),
-                MenuItem::action("深色模式", DarkMode),
-                MenuItem::action("切换主题", ToggleTheme),
-                MenuItem::separator(),
-                MenuItem::action("进入全屏", ToggleFullscreen),
-            ],
-        },
-        // ---- 前往菜单 ----
-        Menu {
-            name: "前往".into(),
-            disabled: false,
-            items: vec![
-                MenuItem::action("返回", GoBack),
-                MenuItem::separator(),
-                MenuItem::action("今日更新", GoHome),
-                MenuItem::action("我的订阅", GoSubscription),
-                MenuItem::separator(),
-                MenuItem::action("星期一", GoMonday),
-                MenuItem::action("星期二", GoTuesday),
-                MenuItem::action("星期三", GoWednesday),
-                MenuItem::action("星期四", GoThursday),
-                MenuItem::action("星期五", GoFriday),
-                MenuItem::action("星期六", GoSaturday),
-                MenuItem::action("星期日", GoSunday),
-                MenuItem::separator(),
-                MenuItem::action("剧场版", GoMovies),
-            ],
+            items: vec![MenuItem::action(
+                if fullscreen {
+                    "退出全屏"
+                } else {
+                    "进入全屏"
+                },
+                ToggleFullscreen,
+            )],
         },
         // ---- 窗口菜单 ----
         Menu {
@@ -98,12 +80,6 @@ pub fn build_menus() -> Vec<Menu> {
                 MenuItem::action("最小化", MinimizeWindow),
                 MenuItem::action("缩放", ZoomWindow),
             ],
-        },
-        // ---- 帮助菜单 ----
-        Menu {
-            name: "帮助".into(),
-            disabled: false,
-            items: vec![MenuItem::action("蜜柑计划官网", OpenMikanWebsite)],
         },
     ]
 }
