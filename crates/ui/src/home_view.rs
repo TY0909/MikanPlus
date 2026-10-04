@@ -56,7 +56,16 @@ impl RenderOnce for HomeView {
         let theme = cx.theme();
         let on_card_click = self.on_card_click;
         let on_filter_change = self.on_filter_change;
-        let groups = self.groups;
+        // 首页只展示「有字幕组发布作品」的番剧(updated_at 为各字幕组最近发布时间),
+        // 其余(通常尚未开播)直接不显示,同时跳过其封面加载。
+        let groups: Vec<BangumiGroup> = self
+            .groups
+            .into_iter()
+            .filter_map(|mut group| {
+                group.items.retain(|item| item.updated_at.is_some());
+                (!group.items.is_empty()).then_some(group)
+            })
+            .collect();
         let today = self.today_weekday;
         let filter = self.filter;
 

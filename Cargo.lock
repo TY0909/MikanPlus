@@ -7663,8 +7663,10 @@ name = "source"
 version = "0.2.3"
 dependencies = [
  "domain",
+ "roxmltree 0.20.0",
  "scraper",
  "serde",
+ "serde_json",
  "storage",
  "thiserror 2.0.18",
  "ureq",

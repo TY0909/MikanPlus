@@ -98,17 +98,14 @@ pub fn poster(
     }
 }
 
-/// 把封面 URL 的尺寸参数替换为竖版海报尺寸(服务器端裁剪,本地不改图)
+/// 统一请求 WebP 竖版裁剪(400×560)。
+///
+/// 与旧版 HTML 封面一致(`?format=webp&width=400&height=560`):既让服务端返回更小的
+/// WebP,也使 URL 的查询串与旧版相同——图片缓存键是「路径+查询串」,因此可直接复用
+/// 旧版已缓存的封面,不会因换数据源而整片重下。
 fn cover_url(url: &str) -> String {
-    let (base, query) = url.split_once('?').unwrap_or((url, ""));
-    let kept: Vec<&str> = query
-        .split('&')
-        .filter(|p| !p.starts_with("width=") && !p.starts_with("height="))
-        .collect();
-    let mut parts = kept;
-    parts.push("width=400");
-    parts.push("height=560");
-    format!("{base}?{}", parts.join("&"))
+    let base = url.split_once('?').map(|(base, _)| base).unwrap_or(url);
+    format!("{base}?format=webp&width=400&height=560")
 }
 
 /// 远程封面:已缓存直接显示;未缓存显示占位,首次进入视口才下载。
@@ -174,7 +171,9 @@ fn lazy_cover(
                     if bounds.intersects(&visible) && source::network::claim_image(&url) {
                         let url = url.clone();
                         std::thread::spawn(move || {
-                            let ok = source::network::fetch_bytes(&url)
+                            // 首选可用主机并对失败做回退(见 fetch_image_bytes);
+                            // 缓存键与主机无关,统一按原 URL 存储。
+                            let ok = source::network::fetch_image_bytes(&url)
                                 .and_then(|bytes| {
                                     storage::cache::store_image(&url, &bytes)
                                         .map(|_| ())

@@ -28,9 +28,14 @@ pub const BACKUP_BASE_URL: &str = "https://mikanime.tv";
 /// 启动时由设置值恢复,在设置页切换后持久化。
 static USE_BACKUP_DOMAIN: AtomicBool = AtomicBool::new(false);
 
+/// 图片抓取上次成功的主机是否为「另一侧」(见 [`fetch_image_bytes`])。
+static IMAGE_USE_ALTERNATE: AtomicBool = AtomicBool::new(false);
+
 /// 设置是否使用备用域名
 pub fn set_backup_domain(enabled: bool) {
     USE_BACKUP_DOMAIN.store(enabled, Ordering::Relaxed);
+    // 数据源切换后重新探测图片可用主机
+    IMAGE_USE_ALTERNATE.store(false, Ordering::Relaxed);
 }
 
 /// 当前是否使用备用域名
@@ -64,6 +69,30 @@ fn rewrite_host(url: &str, base: &str) -> String {
                 .map(|rest| format!("{base}{rest}"))
         })
         .unwrap_or_else(|| url.to_string())
+}
+
+/// 同一路径在另一数据源主机下的 URL。
+///
+/// 用于图片抓取的回退:备用域名 `mikanime.tv` 对图片会 302 回主站,但其
+/// `Location` 把路径小写化(`/images/Bangumi` → `/images/bangumi`),主站大小写敏感
+/// 会返回 404;反向地,主站不可达时备用域名可直连。返回 `None` 表示 URL 不是
+/// 任一已知数据源主机下的地址。
+///
+/// 图片缓存键与主机无关(见 `storage::cache::image_key`),因此任一主机命中的结果
+/// 都写入同一份缓存。
+pub fn alternate_url(url: &str) -> Option<String> {
+    [BASE_URL, BACKUP_BASE_URL].iter().find_map(|host| {
+        url.strip_prefix(host)
+            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
+            .map(|rest| {
+                let other = if *host == BASE_URL {
+                    BACKUP_BASE_URL
+                } else {
+                    BASE_URL
+                };
+                format!("{other}{rest}")
+            })
+    })
 }
 
 /// 请求间最小间隔
@@ -441,6 +470,39 @@ pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, SourceError> {
     }
 }
 
+/// 抓取图片:先试当前数据源主机,失败回退另一主机,并记住上次成功的一侧,
+/// 使后续封面不必重复一次失败请求。
+///
+/// 备用域名对图片的 302 会把路径小写化(`/images/Bangumi` → `/images/bangumi`),
+/// 主站大小写敏感返回 404;反之上不可达时备用域名可直连。图片缓存键与主机无关
+/// (见 `storage::cache::image_key`),由调用方统一存储,两次尝试命中同一份缓存。
+pub fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, SourceError> {
+    let alternate = alternate_url(url);
+    let (first, second, first_is_alternate) = match alternate {
+        Some(alt) if IMAGE_USE_ALTERNATE.load(Ordering::Relaxed) => (alt, url.to_string(), true),
+        Some(alt) => (url.to_string(), alt, false),
+        None => (url.to_string(), String::new(), false),
+    };
+    match fetch_bytes(&first) {
+        Ok(bytes) => {
+            IMAGE_USE_ALTERNATE.store(first_is_alternate, Ordering::Relaxed);
+            Ok(bytes)
+        }
+        Err(first_err) => {
+            if second.is_empty() {
+                return Err(first_err);
+            }
+            match fetch_bytes(&second) {
+                Ok(bytes) => {
+                    IMAGE_USE_ALTERNATE.store(!first_is_alternate, Ordering::Relaxed);
+                    Ok(bytes)
+                }
+                Err(_) => Err(first_err),
+            }
+        }
+    }
+}
+
 /// 拼接站点完整 URL;仅接受 http/https scheme(大小写不敏感),
 /// 防止解析出的坏链接拼出畸形 URL 或指向 file:// 等本地资源。
 pub fn site_url(path: &str) -> String {
@@ -508,6 +570,22 @@ mod tests {
             rewrite_host("https://mikanani.me.evil.com/x", BASE_URL),
             "https://mikanani.me.evil.com/x"
         );
+    }
+
+    #[test]
+    fn alternate_url_swaps_known_hosts() {
+        assert_eq!(
+            alternate_url("https://mikanani.me/images/Bangumi/a.jpg?width=400&height=560"),
+            Some("https://mikanime.tv/images/Bangumi/a.jpg?width=400&height=560".to_string())
+        );
+        assert_eq!(
+            alternate_url("https://mikanime.tv/images/Bangumi/a.jpg"),
+            Some("https://mikanani.me/images/Bangumi/a.jpg".to_string())
+        );
+        // 非已知主机 / 同前缀域名不误伤
+        assert_eq!(alternate_url("https://other.com/x"), None);
+        assert_eq!(alternate_url("https://mikanani.me.evil.com/x"), None);
+        assert_eq!(alternate_url("/images/a.jpg"), None);
     }
 
     #[test]

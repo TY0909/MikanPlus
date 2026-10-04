@@ -29,7 +29,7 @@ use gpui_kit::{
 #[cfg(target_os = "macos")]
 use crate::menu::build_menus;
 use domain::navigation::{HomeFilter, Page, TopSection};
-use domain::{BangumiGroup, BangumiItem, SearchResults, Subscription};
+use domain::{BangumiGroup, BangumiItem, Episode, SearchResults, Subscription};
 use downloader::{DownloadCmd, DownloadManager};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::switch::Switch;
@@ -40,12 +40,12 @@ use storage::{
 use ui::actions::*;
 use ui::app_theme;
 use ui::home_view::{FilterChangeCallback, HomeView, today_weekday};
-use ui::subgroup_detail_page::OpenFilterCallback;
+use ui::subgroup_detail_page::{OpenFilterCallback, ReloadEpisodesCallback};
 use ui::subscription_page::{SubCardClickCallback, UnsubscribeCallback};
 use ui::toolbar::{ActionCallback, NavigateCallback, Toolbar};
 use ui::{
-    BangumiDetailPage, DownloadCollectionPage, DownloadObserverPage, SearchResultPage,
-    SettingsPage, SubGroupDetailPage, SubscriptionPage,
+    BangumiDetailPage, DownloadCollectionPage, DownloadObserverPage, GroupEpisodesState,
+    SearchResultPage, SettingsPage, SubGroupDetailPage, SubscriptionPage,
 };
 
 pub type GoBackCallback = Rc<dyn Fn(&mut Window, &mut App)>;
@@ -209,6 +209,23 @@ enum ListState {
     Error(SourceError),
 }
 
+/// 字幕组剧集懒加载状态(会话内内存缓存)。
+#[derive(Clone)]
+enum EpisodesState {
+    Loading,
+    Loaded(Vec<Episode>),
+    Failed(SourceError),
+}
+
+/// 将内部剧集状态映射为 UI 视图状态(错误只暴露面向用户的信息)。
+fn group_state_view(state: &EpisodesState) -> GroupEpisodesState {
+    match state {
+        EpisodesState::Loading => GroupEpisodesState::Loading,
+        EpisodesState::Loaded(episodes) => GroupEpisodesState::Ready(episodes.clone()),
+        EpisodesState::Failed(e) => GroupEpisodesState::Failed(e.user_message().to_string()),
+    }
+}
+
 /// 后台加载结果(由独立线程写入,主线程轮询消费)
 static LIST_RESULT: Mutex<Option<Result<Vec<BangumiGroup>, SourceError>>> = Mutex::new(None);
 /// 详情加载结果:bid → 结果(使用 OnceLock 惰性初始化)
@@ -217,6 +234,9 @@ static DETAIL_RESULT: OnceLock<Mutex<HashMap<u32, Result<BangumiItem, SourceErro
 /// 搜索加载结果:query → 结果
 static SEARCH_RESULT: OnceLock<Mutex<HashMap<String, Result<SearchResults, SourceError>>>> =
     OnceLock::new();
+/// 字幕组剧集懒加载结果表:(番剧id, 字幕组id) → 结果
+type GroupResultMap = HashMap<(u32, u32), Result<Vec<Episode>, SourceError>>;
+static GROUP_RESULT: OnceLock<Mutex<GroupResultMap>> = OnceLock::new();
 /// 后台加载完成信号:任何加载完成时递增,供轮询循环刷新 UI
 static LOAD_VERSION: AtomicU64 = AtomicU64::new(0);
 
@@ -226,6 +246,10 @@ fn detail_result() -> &'static Mutex<HashMap<u32, Result<BangumiItem, SourceErro
 
 fn search_result() -> &'static Mutex<HashMap<String, Result<SearchResults, SourceError>>> {
     SEARCH_RESULT.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn group_result() -> &'static Mutex<GroupResultMap> {
+    GROUP_RESULT.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 struct MikanPlus {
@@ -244,6 +268,10 @@ struct MikanPlus {
     detail_error: HashMap<String, SourceError>,
     /// 详情加载的 bid → name 映射(消费结果时不再依赖列表查找)
     detail_names: HashMap<u32, String>,
+    /// 字幕组剧集懒加载:(番剧id, 字幕组id) → 状态
+    group_episodes: HashMap<(u32, u32), EpisodesState>,
+    /// 详情页已展开的字幕组:(番剧id, 字幕组id)
+    expanded_groups: HashSet<(u32, u32)>,
     /// 在线搜索结果:query → 结果(番剧卡片 + 剧集列表)
     search_results: HashMap<String, SearchResults>,
     /// search_results 的插入顺序(LRU 近似淘汰用)
@@ -617,6 +645,8 @@ impl MikanPlus {
                 detail_loading: HashSet::new(),
                 detail_error: HashMap::new(),
                 detail_names: HashMap::new(),
+                group_episodes: HashMap::new(),
+                expanded_groups: HashSet::new(),
                 search_results: HashMap::new(),
                 search_order: VecDeque::new(),
                 search_loading: HashSet::new(),
@@ -699,12 +729,10 @@ impl MikanPlus {
             return;
         }
         // 用户主动加载/重试:清除该页面的退避状态,立即放行
-        let base = source::network::base_url();
-        source::network::reset_backoff(base);
+        source::network::reset_backoff(&source::api::home_url());
         self.list_state = ListState::Loading;
         std::thread::spawn(move || {
-            let result = source::network::fetch_html(base)
-                .map(|html| source::parser::parse_bangumi_list(&html));
+            let result = source::api::fetch_home();
             if let Ok(groups) = &result {
                 // 写缓存,减少后续访问
                 if let Ok(v) = serde_json::to_value(groups) {
@@ -799,23 +827,20 @@ impl MikanPlus {
             return;
         }
         // 用户主动进入/重试:清除该详情页的退避状态,立即放行
-        let url = format!("{}/Home/Bangumi/{bid}", source::network::base_url());
-        source::network::reset_backoff(&url);
+        source::network::reset_backoff(&source::api::bangumi_url(bid));
+        // 以列表/搜索结果中的名称作为页面键,保证导航一致
+        let base_name = base.name;
         self.detail_loading.insert(name.clone());
         cx.notify();
         std::thread::spawn(move || {
-            let result = source::network::fetch_html(&url)
-                .map(|html| source::parser::parse_bangumi_detail(&html))
-                .map(|(meta, groups)| {
-                    let mut item = base;
-                    item.meta = Some(meta);
-                    item.subtitle_groups = groups;
-                    // 写缓存
-                    if let Ok(v) = serde_json::to_value(&item) {
-                        storage::cache::store_detail(bid, &v);
-                    }
-                    item
-                });
+            let result = source::api::fetch_bangumi(bid).map(|mut item| {
+                item.name = base_name;
+                // 写缓存
+                if let Ok(v) = serde_json::to_value(&item) {
+                    storage::cache::store_detail(bid, &v);
+                }
+                item
+            });
             detail_result().lock().unwrap().insert(bid, result);
             LOAD_VERSION.fetch_add(1, Ordering::Relaxed);
         });
@@ -859,6 +884,52 @@ impl MikanPlus {
                 }
             }
         }
+    }
+
+    /// 确保某字幕组的剧集已加载(懒加载):内存命中直接返回,否则后台拉取 RSS。
+    fn ensure_group_episodes(&mut self, bangumi_id: u32, subgroup_id: u32, cx: &mut Context<Self>) {
+        let key = (bangumi_id, subgroup_id);
+        if self.group_episodes.contains_key(&key) {
+            return;
+        }
+        // 用户主动展开/重试:清除该 RSS 的退避状态,立即放行
+        source::network::reset_backoff(&source::rss::subgroup_rss_url(bangumi_id, subgroup_id));
+        self.group_episodes.insert(key, EpisodesState::Loading);
+        cx.notify();
+        std::thread::spawn(move || {
+            let result = source::rss::fetch_subgroup_episodes(bangumi_id, subgroup_id);
+            group_result().lock().unwrap().insert(key, result);
+            LOAD_VERSION.fetch_add(1, Ordering::Relaxed);
+        });
+    }
+
+    /// 消费后台线程完成的字幕组剧集结果(render 时调用,幂等)
+    fn consume_group_results(&mut self) {
+        let finished: Vec<_> = group_result().lock().unwrap().drain().collect();
+        for (key, result) in finished {
+            let state = match result {
+                Ok(episodes) => EpisodesState::Loaded(episodes),
+                Err(e) => EpisodesState::Failed(e),
+            };
+            self.group_episodes.insert(key, state);
+        }
+    }
+
+    /// 展开/折叠详情页的某个字幕组;展开时按需加载剧集。
+    fn toggle_group(&mut self, bangumi_id: u32, subgroup_id: u32, cx: &mut Context<Self>) {
+        let key = (bangumi_id, subgroup_id);
+        if self.expanded_groups.remove(&key) {
+            cx.notify();
+            return;
+        }
+        self.expanded_groups.insert(key);
+        self.ensure_group_episodes(bangumi_id, subgroup_id, cx);
+    }
+
+    /// 重新加载某字幕组的剧集(失败后重试)。
+    fn reload_group(&mut self, bangumi_id: u32, subgroup_id: u32, cx: &mut Context<Self>) {
+        self.group_episodes.remove(&(bangumi_id, subgroup_id));
+        self.ensure_group_episodes(bangumi_id, subgroup_id, cx);
     }
 
     /// 按 bid 定位详情名称(详情缓存 → 加载映射 → 列表 → 订阅记录)
@@ -1361,6 +1432,7 @@ impl Render for MikanPlus {
         // 消费后台线程完成的结果(幂等)
         self.consume_list_result();
         self.consume_detail_results();
+        self.consume_group_results();
         self.consume_search_results();
 
         // 当前页面的滚动句柄(应用持有,页面切换后恢复原位置)
@@ -1482,6 +1554,42 @@ impl Render for MikanPlus {
                 self.ensure_detail(name.clone(), cx);
                 let check = subscribed_check.clone();
                 if let Some(item) = self.details.get(&name).cloned() {
+                    let bid = item.bangumi_id.unwrap_or(0);
+                    // 该番剧已展开的字幕组 + 各自剧集状态(映射为 UI 视图)
+                    let expanded_groups: HashSet<u32> = self
+                        .expanded_groups
+                        .iter()
+                        .filter(|(b, _)| *b == bid)
+                        .map(|(_, sid)| *sid)
+                        .collect();
+                    let group_episodes: HashMap<u32, GroupEpisodesState> = self
+                        .group_episodes
+                        .iter()
+                        .filter(|((b, _), _)| *b == bid)
+                        .map(|((_, sid), state)| (*sid, group_state_view(state)))
+                        .collect();
+                    let on_toggle_group: ui::ToggleGroupCallback = {
+                        let entity = cx.entity().clone();
+                        Rc::new(move |bid, sid, _window, app| {
+                            entity.update(
+                                app,
+                                |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
+                                    mp.toggle_group(bid, sid, cx);
+                                },
+                            );
+                        })
+                    };
+                    let on_reload_group: ui::ToggleGroupCallback = {
+                        let entity = cx.entity().clone();
+                        Rc::new(move |bid, sid, _window, app| {
+                            entity.update(
+                                app,
+                                |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
+                                    mp.reload_group(bid, sid, cx);
+                                },
+                            );
+                        })
+                    };
                     let detail = BangumiDetailPage {
                         item: Some(item),
                         is_subscribed: check,
@@ -1489,6 +1597,10 @@ impl Render for MikanPlus {
                         scroll_handle: scroll_handle.clone(),
                         downloader: self.downloader.clone(),
                         on_open_collection: self.on_open_collection.clone(),
+                        expanded_groups,
+                        group_episodes,
+                        on_toggle_group,
+                        on_reload_group,
                     };
                     detail.into_any_element()
                 } else if let Some(err) = self.detail_error.get(&name) {
@@ -1506,6 +1618,21 @@ impl Render for MikanPlus {
                 }
             }
             Page::SubGroupDetail(bid, sid) => {
+                // 剧集懒加载:进入页面即按需拉取(状态命中则复用)
+                self.ensure_group_episodes(bid, sid, cx);
+                let episodes_state = self
+                    .group_episodes
+                    .get(&(bid, sid))
+                    .map(group_state_view)
+                    .unwrap_or(GroupEpisodesState::Loading);
+                let on_reload_episodes: ReloadEpisodesCallback = {
+                    let entity = cx.entity().clone();
+                    Rc::new(move |_window, app| {
+                        entity.update(app, |mp: &mut MikanPlus, cx: &mut Context<MikanPlus>| {
+                            mp.reload_group(bid, sid, cx);
+                        });
+                    })
+                };
                 // 剧集筛选关键词(按订阅条目记忆)与打开筛选窗口回调
                 let filter_key = (bid, sid);
                 let keyword = self
@@ -1545,6 +1672,8 @@ impl Render for MikanPlus {
                             on_open_collection: self.on_open_collection.clone(),
                             keyword: keyword.clone(),
                             on_open_filter: on_open_filter.clone(),
+                            episodes_state: episodes_state.clone(),
+                            on_reload_episodes: on_reload_episodes.clone(),
                         };
                         page.into_any_element()
                     }
@@ -1578,6 +1707,8 @@ impl Render for MikanPlus {
                                 on_open_collection: self.on_open_collection.clone(),
                                 keyword: keyword.clone(),
                                 on_open_filter: on_open_filter.clone(),
+                                episodes_state: episodes_state.clone(),
+                                on_reload_episodes: on_reload_episodes.clone(),
                             };
                             page.into_any_element()
                         } else if let Some(name) = name
@@ -2221,8 +2352,6 @@ fn render_filter_modal(
 /// gpui-component 的 Spinner 转速固定为 0.8s/圈且无法配置,这里照其内部实现
 /// 自绘一个 1.6s/圈的版本(仅调整周期,其余行为一致),让等待过程更舒缓。
 fn loading_view(theme: &gpui_kit::component::theme::Theme) -> gpui_kit::Div {
-    use gpui_kit::component::{Icon, IconName, Sizable};
-    use gpui_kit::{Animation, AnimationExt, Transformation, percentage};
     gpui_kit::div()
         .size_full()
         .flex()
@@ -2231,6 +2360,7 @@ fn loading_view(theme: &gpui_kit::component::theme::Theme) -> gpui_kit::Div {
         .flex_col()
         .child(
             // 圆形容器 + 缓慢旋转的加载图标:比裸 spinner 更有层次
+            // (旋转图标与字幕组加载态共用 ui::spinner,保证一致)
             gpui_kit::div()
                 .size(px(64.))
                 .rounded_full()
@@ -2239,16 +2369,7 @@ fn loading_view(theme: &gpui_kit::component::theme::Theme) -> gpui_kit::Div {
                 .flex()
                 .items_center()
                 .justify_center()
-                .child(
-                    Icon::new(IconName::Loader)
-                        .with_size(px(30.))
-                        .text_color(theme.primary)
-                        .with_animation(
-                            "loading-spin",
-                            Animation::new(std::time::Duration::from_secs_f64(1.6)).repeat(),
-                            |this, delta| this.transform(Transformation::rotate(percentage(delta))),
-                        ),
-                ),
+                .child(ui::spinner::spinner("loading-spin", 30., theme.primary)),
         )
         .child(
             gpui_kit::div()

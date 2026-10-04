@@ -4,6 +4,6 @@ mod model;
 pub mod navigation;
 
 pub use model::{
-    BangumiGroup, BangumiItem, BangumiMeta, Episode, SearchEpisode, SearchResults, Subscription,
-    SubtitleGroup,
+    BangumiGroup, BangumiItem, BangumiKind, BangumiMeta, Episode, SearchEpisode, SearchResults,
+    Season, SeasonName, Subscription, SubtitleGroup, Weekday,
 };

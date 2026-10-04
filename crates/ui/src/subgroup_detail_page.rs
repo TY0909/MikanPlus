@@ -11,12 +11,15 @@ use gpui_kit::{App, ScrollHandle, Window, prelude::*, px, relative};
 use crate::app_theme;
 use crate::icons::icon;
 use crate::layout::MAX_SUBGROUP_W;
+use crate::load_state::GroupEpisodesState;
 use domain::SubtitleGroup;
 use downloader::DownloadManager;
 use storage::paths;
 
 /// 打开筛选窗口的回调
 pub type OpenFilterCallback = Rc<dyn Fn(&mut Window, &mut App)>;
+/// 重新加载剧集(失败后重试)的回调
+pub type ReloadEpisodesCallback = Rc<dyn Fn(&mut Window, &mut App)>;
 
 #[derive(IntoElement)]
 pub struct SubGroupDetailPage {
@@ -32,6 +35,10 @@ pub struct SubGroupDetailPage {
     pub keyword: String,
     /// 点击「筛选」按钮时打开筛选窗口
     pub on_open_filter: OpenFilterCallback,
+    /// 剧集懒加载状态(详情数据不含剧集,进入页面时按需拉取)
+    pub episodes_state: GroupEpisodesState,
+    /// 加载失败后重试剧集
+    pub on_reload_episodes: ReloadEpisodesCallback,
 }
 
 impl RenderOnce for SubGroupDetailPage {
@@ -40,8 +47,13 @@ impl RenderOnce for SubGroupDetailPage {
         let group = self.group;
         let bangumi_name = self.bangumi_name.clone();
         let group_name = group.name.clone();
-        let episodes = group.episodes.clone();
-        let total = episodes.len();
+        let episodes_state = self.episodes_state;
+        let on_reload_episodes = self.on_reload_episodes.clone();
+        // 已加载时用实际剧集;未加载/失败时回退到 API 声明的集数
+        let (episodes, total) = match &episodes_state {
+            GroupEpisodesState::Ready(episodes) => (episodes.clone(), episodes.len()),
+            _ => (Vec::new(), group.episode_count as usize),
+        };
         let downloader = self.downloader.clone();
         let on_open_collection = self.on_open_collection.clone();
         let dl_snapshot = downloader.snapshot();
@@ -120,72 +132,156 @@ impl RenderOnce for SubGroupDetailPage {
                 )
         };
 
-        let rows = visible.into_iter().map(move |(ix, ep)| {
-            let magnet = ep.magnet_link.clone().unwrap_or_default();
-            let size = ep.size.clone().unwrap_or_default();
-            let date = ep.publish_date.clone().unwrap_or_default();
-            let title = crate::episode_row::truncate_title(&ep.title, title_max_px, 14.0);
+        let rows: Vec<gpui_kit::AnyElement> = visible
+            .into_iter()
+            .map(move |(ix, ep)| {
+                let magnet = ep.magnet_link.clone().unwrap_or_default();
+                let size = ep.size.clone().unwrap_or_default();
+                let date = ep.publish_date.clone().unwrap_or_default();
+                let title = crate::episode_row::truncate_title(&ep.title, title_max_px, 14.0);
 
-            let action_btn = crate::episode_row::action_button(
-                ix,
-                &title,
-                &magnet,
-                &dl_dir,
-                &downloader,
-                &dl_snapshot,
-                &on_open_collection,
-                theme,
-            );
+                let action_btn = crate::episode_row::action_button(
+                    ix,
+                    &title,
+                    &magnet,
+                    &dl_dir,
+                    &downloader,
+                    &dl_snapshot,
+                    &on_open_collection,
+                    theme,
+                );
 
-            // 剧集行:flex 布局。文本列固定 60%(超长截断),
-            // 操作列固定 40%(下载区为独立子元素,默认右对齐)。
-            gpui_kit::div()
-                .id(gpui_kit::SharedString::from(format!("sg-row-{ix}")))
-                .w_full()
-                .px(px(14.))
-                .py(px(14.))
-                .flex()
-                .items_center()
-                .rounded(px(8.))
-                .hover(|style| style.bg(theme.list_hover))
-                .child(
-                    // 文本列:60% 空间
-                    gpui_kit::div()
-                        .w(relative(0.6))
-                        .flex()
-                        .flex_col()
-                        .child(crate::episode_row::title_cell(ix, &ep.title, &title, theme))
-                        .child(
-                            gpui_kit::div()
-                                .mt(px(3.))
-                                .flex()
-                                .gap(px(10.))
-                                .child(
-                                    gpui_kit::div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(size),
-                                )
-                                .child(
-                                    gpui_kit::div()
-                                        .text_xs()
-                                        .text_color(theme.muted_foreground)
-                                        .child(date),
-                                ),
-                        ),
-                )
-                .child(
-                    // 操作列:40% 空间,下载区右对齐;极窄窗口下左侧溢出被裁剪,
-                    // 右侧的取消/打开等关键按钮保持完整
-                    gpui_kit::div()
-                        .w(relative(0.4))
-                        .overflow_hidden()
-                        .flex()
-                        .items_center()
-                        .justify_end()
-                        .child(action_btn),
-                )
-        });
+                // 剧集行:flex 布局。文本列固定 60%(超长截断),
+                // 操作列固定 40%(下载区为独立子元素,默认右对齐)。
+                gpui_kit::div()
+                    .id(gpui_kit::SharedString::from(format!("sg-row-{ix}")))
+                    .w_full()
+                    .px(px(14.))
+                    .py(px(14.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(8.))
+                    .hover(|style| style.bg(theme.list_hover))
+                    .child(
+                        // 文本列:60% 空间
+                        gpui_kit::div()
+                            .w(relative(0.6))
+                            .flex()
+                            .flex_col()
+                            .child(crate::episode_row::title_cell(ix, &ep.title, &title, theme))
+                            .child(
+                                gpui_kit::div()
+                                    .mt(px(3.))
+                                    .flex()
+                                    .gap(px(10.))
+                                    .child(
+                                        gpui_kit::div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(size),
+                                    )
+                                    .child(
+                                        gpui_kit::div()
+                                            .text_xs()
+                                            .text_color(theme.muted_foreground)
+                                            .child(date),
+                                    ),
+                            ),
+                    )
+                    .child(
+                        // 操作列:40% 空间,下载区右对齐;极窄窗口下左侧溢出被裁剪,
+                        // 右侧的取消/打开等关键按钮保持完整
+                        gpui_kit::div()
+                            .w(relative(0.4))
+                            .overflow_hidden()
+                            .flex()
+                            .items_center()
+                            .justify_end()
+                            .child(action_btn),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        // 列表主体:加载中 / 失败重试 / 剧集行(含筛选空态)
+        let list_body: Vec<gpui_kit::AnyElement> = match &episodes_state {
+            GroupEpisodesState::Loading => vec![
+                gpui_kit::div()
+                    .w_full()
+                    .py(px(40.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(8.))
+                    .child(crate::spinner::spinner(
+                        "sg-spin",
+                        15.,
+                        theme.muted_foreground,
+                    ))
+                    .child(
+                        gpui_kit::div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child("正在加载剧集…"),
+                    )
+                    .into_any_element(),
+            ],
+            GroupEpisodesState::Failed(message) => vec![
+                gpui_kit::div()
+                    .w_full()
+                    .py(px(40.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(
+                        gpui_kit::div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(message.clone()),
+                    )
+                    .child(
+                        gpui_kit::div()
+                            .id("sg-retry")
+                            .px(px(12.))
+                            .py(px(4.))
+                            .rounded(px(6.))
+                            .border_1()
+                            .border_color(theme.border)
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(theme.foreground)
+                            .cursor_pointer()
+                            .hover(|style| style.bg(theme.list_hover).border_color(theme.primary))
+                            .on_click(move |_, window, app| on_reload_episodes(window, app))
+                            .child("重试"),
+                    )
+                    .into_any_element(),
+            ],
+            GroupEpisodesState::Ready(_) if visible_count == 0 => vec![
+                // 筛选后无结果:友好空状态
+                gpui_kit::div()
+                    .w_full()
+                    .py(px(40.))
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(icon("inbox", 24.).text_color(theme.muted_foreground))
+                    .child(
+                        gpui_kit::div()
+                            .text_sm()
+                            .text_color(theme.muted_foreground)
+                            .child(if filtering {
+                                format!("没有标题包含「{keyword}」的剧集")
+                            } else {
+                                "该字幕组暂无剧集".to_string()
+                            }),
+                    )
+                    .into_any_element(),
+            ],
+            GroupEpisodesState::Ready(_) => rows,
+        };
 
         gpui_kit::div()
             .size_full()
@@ -287,31 +383,7 @@ impl RenderOnce for SubGroupDetailPage {
                                                 )
                                                 .child(filter_btn),
                                         )
-                                        .children(rows)
-                                        .when(visible_count == 0, |this| {
-                                            this.child(
-                                                // 筛选后无结果:友好空状态
-                                                gpui_kit::div()
-                                                    .w_full()
-                                                    .py(px(40.))
-                                                    .flex()
-                                                    .flex_col()
-                                                    .items_center()
-                                                    .gap(px(8.))
-                                                    .child(
-                                                        icon("inbox", 24.)
-                                                            .text_color(theme.muted_foreground),
-                                                    )
-                                                    .child(
-                                                        gpui_kit::div()
-                                                            .text_sm()
-                                                            .text_color(theme.muted_foreground)
-                                                            .child(format!(
-                                                                "没有标题包含「{keyword}」的剧集"
-                                                            )),
-                                                    ),
-                                            )
-                                        }),
+                                        .children(list_body),
                                 ),
                         ),
                     ),

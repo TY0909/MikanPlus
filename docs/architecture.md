@@ -30,7 +30,11 @@ Owns local state, cache layout, migrations, application directories, filename no
 
 ### `source`
 
-Owns the Mikan HTTP adapter, request throttling and backoff, URL normalization, and HTML parsing into `domain` records.
+Owns the Mikan data adapters, request throttling and backoff, and URL normalization. It exposes three sources and maps each to `domain` records:
+
+- The public JSON API (`api`): home listing (`GET /api/v1/bangumi`) and bangumi metadata plus subtitle-group summaries (`GET /api/v1/bangumi/{id}`). The API ignores query parameters and does not include episodes.
+- The RSS endpoint (`rss`): a single subtitle group's episodes (`GET /RSS/Bangumi?bangumiId=&subgroupid=`), loaded on demand from the detail page.
+- The search page (`parser`): the only surface without a JSON API, so it keeps HTML parsing.
 
 ### `downloader`
 
