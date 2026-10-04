@@ -20,8 +20,9 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use librqbit::{
-    AddTorrent, AddTorrentOptions, AddTorrentResponse, Session, SessionOptions,
-    SessionPersistenceConfig, TorrentStatsState,
+    AddTorrent, AddTorrentOptions, AddTorrentResponse, ConnectionOptions, DhtSessionConfig,
+    ListenerMode, ListenerOptions, Session, SessionOptions, SessionPersistenceConfig,
+    TorrentStatsState,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -161,6 +162,49 @@ pub struct TaskView {
     pub output_dir: Option<PathBuf>,
 }
 
+/// 下载引擎的连接状态(诊断 NAT / 入站可达性)。
+///
+/// `listen_port == 0` 或 `peers_live` 长期为 0,通常意味着处于 NAT/CGNAT 之后
+/// 且没有可用的 IPv6 入站通道。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DownloadStatus {
+    /// 入站监听端口(0 表示未监听)
+    pub listen_port: u16,
+    /// 是否双栈(IPv4 + IPv6)监听
+    pub ipv6: bool,
+    /// DHT 路由表节点数(IPv4 / IPv6)
+    pub dht_nodes: usize,
+    pub dht_nodes_v6: usize,
+    /// 已连接的 peer 数
+    pub peers_live: u32,
+    /// 已发现的 peer 数
+    pub peers_seen: u32,
+    /// 正在连接的 peer 数
+    pub peers_connecting: u32,
+    /// 其中 TCP / uTP 连接数
+    pub peers_tcp: u32,
+    pub peers_utp: u32,
+}
+
+impl DownloadStatus {
+    /// 面向 UI 的一行摘要。
+    pub fn summary(&self) -> String {
+        if self.listen_port == 0 {
+            return "入站未监听（NAT 下只能主动出站）".to_string();
+        }
+        let stack = if self.ipv6 { "IPv4+IPv6" } else { "IPv4" };
+        format!(
+            "入站 {} · {} · DHT {} 节点 · {} 连接（TCP {} / uTP {}）",
+            self.listen_port,
+            stack,
+            self.dht_nodes + self.dht_nodes_v6,
+            self.peers_live,
+            self.peers_tcp,
+            self.peers_utp
+        )
+    }
+}
+
 /// UI → 后台 命令
 pub enum DownloadCmd {
     /// 添加下载任务
@@ -273,6 +317,7 @@ fn push_event(event: DownloadEvent) {
 pub struct DownloadManager {
     cmd_tx: UnboundedSender<DownloadCmd>,
     snapshot: Arc<Mutex<Vec<TaskView>>>,
+    status: Arc<Mutex<DownloadStatus>>,
 }
 
 impl DownloadManager {
@@ -285,15 +330,21 @@ impl DownloadManager {
     pub fn start_with_base(base: PathBuf) -> Arc<Self> {
         let (cmd_tx, cmd_rx) = unbounded_channel::<DownloadCmd>();
         let snapshot: Arc<Mutex<Vec<TaskView>>> = Arc::new(Mutex::new(Vec::new()));
+        let status: Arc<Mutex<DownloadStatus>> = Arc::new(Mutex::new(DownloadStatus::default()));
         let snap = snapshot.clone();
+        let stat = status.clone();
         std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .expect("构建下载 tokio runtime 失败");
-            rt.block_on(run_loop(cmd_rx, snap, base));
+            rt.block_on(run_loop(cmd_rx, snap, stat, base));
         });
-        Arc::new(Self { cmd_tx, snapshot })
+        Arc::new(Self {
+            cmd_tx,
+            snapshot,
+            status,
+        })
     }
 
     /// 发送命令(线程安全,不阻塞)。接收端退出时返回 Err。
@@ -307,12 +358,18 @@ impl DownloadManager {
     pub fn snapshot(&self) -> Vec<TaskView> {
         self.snapshot.lock().unwrap().clone()
     }
+
+    /// 读取连接状态(UI 轮询,用于诊断 NAT / 入站可达性)
+    pub fn status(&self) -> DownloadStatus {
+        self.status.lock().unwrap().clone()
+    }
 }
 
 /// 后台主循环:session 生命周期 + 命令处理 + 周期快照
 async fn run_loop(
     mut cmd_rx: UnboundedReceiver<DownloadCmd>,
     snapshot: Arc<Mutex<Vec<TaskView>>>,
+    status: Arc<Mutex<DownloadStatus>>,
     base_dir: PathBuf,
 ) {
     let persist_dir = base_dir.join("torrents").join("session");
@@ -338,6 +395,10 @@ async fn run_loop(
         }
     };
     eprintln!("下载引擎就绪(已恢复持久化任务)");
+    match session.listen_addr() {
+        Some(addr) => eprintln!("入站监听: {addr}"),
+        None => eprintln!("入站未监听(仅主动出站)"),
+    }
 
     // 孤儿清理:meta 有而 session 无的任务元信息(任务已不存在)删除
     cleanup_orphan_meta(&persist_dir, &meta_dir);
@@ -381,6 +442,7 @@ async fn run_loop(
                     &mut fresh_task_ids,
                     &mut startup_filter_pending,
                 );
+                update_status(&session, &status);
             },
         }
     }
@@ -701,22 +763,59 @@ async fn handle_cmd(session: &Arc<Session>, meta_dir: &Path, cmd: DownloadCmd) {
     }
 }
 
-/// 创建 session:DHT 初始化失败(如端口被占用,常见于双开)时
-/// 降级为禁用 DHT 重试一次,保证 tracker 下载路径可用。
+/// librqbit 默认使用随机端口;固定端口才能让端口映射 / 防火墙规则跨重启保留。
+/// 被占用时回退到随机端口。
+const DEFAULT_LISTEN_PORT: u16 = 6881;
+
+/// IPv6 是否可用(决定能否双栈监听)。
+fn ipv6_available() -> bool {
+    std::net::TcpListener::bind((std::net::Ipv6Addr::UNSPECIFIED, 0)).is_ok()
+}
+
+/// 可选的 SOCKS5 代理:BT 流量经代理出站(高级用法,形如
+/// `socks5://[user:pass@]host:port`),通过环境变量 `MIKAN_SOCKS_PROXY` 配置。
+fn socks_proxy() -> Option<String> {
+    std::env::var("MIKAN_SOCKS_PROXY")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// 入站监听:优先双栈(IPv4 + IPv6),IPv6 不可用时退回纯 IPv4。
+///
+/// 双栈让 NAT / CGNAT 环境下有公网 IPv6 的用户能够接受入站连接
+/// (IPv6 无 NAT,是中国大陆家宽绕过 CGNAT 的主要入站通道)。
+fn listener_options(port: u16) -> ListenerOptions {
+    use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+    let (listen_addr, ipv4_only) = if ipv6_available() {
+        (SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)), false)
+    } else {
+        (SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)), true)
+    };
+    ListenerOptions {
+        mode: ListenerMode::TcpAndUtp,
+        listen_addr,
+        enable_upnp_port_forwarding: true,
+        ipv4_only,
+        ..Default::default()
+    }
+}
+
+/// 创建 session。依次尝试,任一成功即返回:
+/// 1. 固定端口 + DHT;2. 随机端口 + DHT(固定端口被占用);
+/// 3. 随机端口、禁用 DHT(端口被占用常见于双开,禁用 DHT 后仅靠 tracker 仍可下载)。
 async fn create_session(
     persist_dir: &Path,
     dht_file: &Path,
 ) -> Result<Arc<Session>, DownloadError> {
     use librqbit::dht::DhtPersistenceConfig;
-    use librqbit::{DhtSessionConfig, ListenerMode, ListenerOptions};
-    use std::net::Ipv4Addr;
 
-    let make_opts = |disable_dht: bool| SessionOptions {
-        // 入站监听:TCP + uTP(对 NAT 友好、覆盖只用 uTP 的做种者),随机端口 + UPnP 转发
-        listen: Some(ListenerOptions {
-            mode: ListenerMode::TcpAndUtp,
-            listen_addr: (Ipv4Addr::UNSPECIFIED, 0).into(),
-            enable_upnp_port_forwarding: true,
+    let proxy = socks_proxy();
+    let make_opts = |port: u16, enable_dht: bool| SessionOptions {
+        // 入站监听:TCP + uTP(对 NAT 友好、覆盖只用 uTP 的做种者),固定端口 + UPnP 转发
+        listen: Some(listener_options(port)),
+        connect: proxy.as_ref().map(|url| ConnectionOptions {
+            proxy_url: Some(url.clone()),
             ..Default::default()
         }),
         fastresume: true,
@@ -724,7 +823,7 @@ async fn create_session(
             folder: Some(persist_dir.to_path_buf()),
         }),
         // DHT 路由表持久化到应用数据目录(重建成本高,不属于可清理缓存)
-        dht: (!disable_dht).then(|| DhtSessionConfig {
+        dht: enable_dht.then(|| DhtSessionConfig {
             persistence: Some(DhtPersistenceConfig {
                 config_filename: Some(dht_file.to_path_buf()),
                 ..Default::default()
@@ -734,18 +833,16 @@ async fn create_session(
         ..Default::default()
     };
 
-    match Session::new_with_opts(paths::video_dir(), make_opts(false)).await {
-        Ok(s) => Ok(s),
-        Err(e) => {
-            eprintln!("下载引擎初始化失败,尝试禁用 DHT 降级: {e:#}");
-            Session::new_with_opts(paths::video_dir(), make_opts(true))
-                .await
-                .map_err(|e2| {
-                    eprintln!("下载引擎降级后仍失败: {e2:#}");
-                    DownloadError::EngineInit
-                })
+    for (port, enable_dht) in [(DEFAULT_LISTEN_PORT, true), (0, true), (0, false)] {
+        match Session::new_with_opts(paths::video_dir(), make_opts(port, enable_dht)).await {
+            Ok(session) => return Ok(session),
+            Err(error) => eprintln!(
+                "下载引擎初始化失败(端口 {port}, DHT {}): {error:#}",
+                if enable_dht { "开" } else { "关" }
+            ),
         }
     }
+    Err(DownloadError::EngineInit)
 }
 
 /// 孤儿清理:元信息存在但对应任务已不在持久化中的,删除 meta 文件。
@@ -768,6 +865,52 @@ fn cleanup_orphan_meta(session_dir: &Path, meta_dir: &Path) {
             }
         }
     }
+}
+
+/// 汇总连接状态(诊断 NAT / 入站可达性):监听端口、DHT 节点、peer 分类计数。
+fn update_status(session: &Arc<Session>, status: &Arc<Mutex<DownloadStatus>>) {
+    let listen = session.listen_addr();
+    let dht = session.get_dht().map(|dht| dht.stats());
+    let peers = session.with_torrents(|it| {
+        let mut totals = PeerTotals::default();
+        for (_, handle) in it {
+            if let Some(live) = handle.stats().live.as_ref() {
+                let stats = &live.snapshot.peer_stats;
+                totals.live += stats.live;
+                totals.seen += stats.seen;
+                totals.connecting += stats.connecting;
+                totals.tcp += stats.live_tcp;
+                totals.utp += stats.live_utp;
+            }
+        }
+        totals
+    });
+    let next = DownloadStatus {
+        listen_port: listen.map(|addr| addr.port()).unwrap_or(0),
+        ipv6: listen.is_some_and(|addr| addr.is_ipv6()),
+        dht_nodes: dht.as_ref().map(|s| s.routing_table_size).unwrap_or(0),
+        dht_nodes_v6: dht.as_ref().map(|s| s.routing_table_size_v6).unwrap_or(0),
+        peers_live: peers.live,
+        peers_seen: peers.seen,
+        peers_connecting: peers.connecting,
+        peers_tcp: peers.tcp,
+        peers_utp: peers.utp,
+    };
+    let mut guard = status.lock().unwrap();
+    if *guard != next {
+        *guard = next;
+        SNAPSHOT_VERSION.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// 跨任务累加的 peer 计数(会话级汇总)。
+#[derive(Default)]
+struct PeerTotals {
+    live: u32,
+    seen: u32,
+    connecting: u32,
+    tcp: u32,
+    utp: u32,
 }
 
 /// 生成任务快照(每秒)

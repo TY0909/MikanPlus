@@ -23,6 +23,7 @@ pub struct DownloadObserverPage {
 impl RenderOnce for DownloadObserverPage {
     fn render(self, _window: &mut Window, cx: &mut App) -> impl IntoElement {
         let theme = cx.theme();
+        let status = self.downloader.status();
         let tasks: Vec<TaskView> = self
             .tasks
             .into_iter()
@@ -194,6 +195,12 @@ impl RenderOnce for DownloadObserverPage {
                             .text_color(theme.muted_foreground)
                             .child("完成后会自动从此列表移除"),
                     ),
+            )
+            .child(
+                gpui_kit::div()
+                    .text_xs()
+                    .text_color(theme.muted_foreground)
+                    .child(status.summary()),
             )
             .child(if count == 0 {
                 gpui_kit::div()

@@ -34,7 +34,7 @@ Owns the Mikan HTTP adapter, request throttling and backoff, URL normalization, 
 
 ### `downloader`
 
-Owns the librqbit session, command serialization, torrent metadata, task snapshots, cancellation, and cleanup. Commands are processed in send order while snapshot generation remains independent.
+Owns the librqbit session, command serialization, torrent metadata, task snapshots, connection status, cancellation, and cleanup. Commands are processed in send order while snapshot generation remains independent. The session listens on both IPv4 and IPv6 (a fixed default port with an ephemeral fallback) so hosts behind NAT/CGNAT can still accept incoming connections over a public IPv6 address; an optional SOCKS5 proxy can be configured through `MIKAN_SOCKS_PROXY`.
 
 ### `ui`
 
