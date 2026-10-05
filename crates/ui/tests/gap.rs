@@ -1,9 +1,10 @@
-//! 临时验证:flex 布局行为(gpui 0.2.2 crates.io 版)
+//! Ad-hoc probes for flex layout behavior in the gpui 0.2.2 crates.io release.
 
 use gpui_kit::TestAppContext;
 use gpui_kit::VisualTestContext;
 use gpui_kit::{Context, Render, Size, Window, div, prelude::*, px};
 
+/// Root fixture: three 100px-wide children in a flex row with an 18px gap.
 struct FlexFixture;
 impl Render for FlexFixture {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -38,6 +39,7 @@ impl Render for FlexFixture {
     }
 }
 
+/// Root fixture: two stacked children separated by a 24px gap.
 struct ColGapFixture;
 impl Render for ColGapFixture {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -64,6 +66,7 @@ impl Render for ColGapFixture {
     }
 }
 
+/// Root fixture: two children centered both horizontally and vertically.
 struct CenterFixture;
 impl Render for CenterFixture {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
@@ -93,6 +96,7 @@ impl Render for CenterFixture {
     }
 }
 
+/// Opens a fixture window sized 1200x800, runs pending layout, and prints `label`.
 fn open<T: Render + 'static>(
     cx: &mut TestAppContext,
     label: &str,
@@ -111,6 +115,7 @@ fn open<T: Render + 'static>(
     cx
 }
 
+/// Children lay out left to right; the second child starts at x = 100 + 18 = 118.
 #[gpui_kit::test]
 fn flex_row_horizontal(cx: &mut TestAppContext) {
     let mut cx = open(cx, "flex_row", || FlexFixture);
@@ -126,6 +131,7 @@ fn flex_row_horizontal(cx: &mut TestAppContext) {
     assert_eq!(b.origin.x, px(118.), "flex_row 子项应水平排列且 gap 生效");
 }
 
+/// Two stacked children keep the configured 24px vertical gap.
 #[gpui_kit::test]
 fn flex_col_gap(cx: &mut TestAppContext) {
     let mut cx = open(cx, "flex_col+gap", || ColGapFixture);
@@ -142,6 +148,7 @@ fn flex_col_gap(cx: &mut TestAppContext) {
     );
 }
 
+/// Items are horizontally centered and the column as a whole is vertically centered.
 #[gpui_kit::test]
 fn flex_col_center(cx: &mut TestAppContext) {
     let mut cx = open(cx, "flex_col+center", || CenterFixture);
@@ -150,9 +157,9 @@ fn flex_col_center(cx: &mut TestAppContext) {
     }
     let a = cx.debug_bounds("a").unwrap();
     let b = cx.debug_bounds("b").unwrap();
-    // 水平居中:x = (1200 - 120) / 2 = 540
+    // Horizontal centering: x = (1200 - 120) / 2 = 540
     assert_eq!(a.origin.x, px(540.), "items_center 应水平居中");
-    // 垂直居中:总高 30+16+30 = 76,起始 y = (800-76)/2 = 362
+    // Vertical centering: total height 30+16+30 = 76, start y = (800-76)/2 = 362
     assert_eq!(a.origin.y, px(362.), "justify_center 应垂直居中");
     assert_eq!(b.origin.y - (a.origin.y + a.size.height), px(16.), "gap 16");
 }

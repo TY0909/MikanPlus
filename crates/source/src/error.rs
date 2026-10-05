@@ -1,38 +1,39 @@
-//! 数据源错误(网络抓取 / 解码 / 缓存写入)。
+//! Data-source errors (network fetching / decoding / cache writes).
 //!
-//! 面向用户的展示统一通过 [`SourceError::user_message`] 与
-//! [`SourceError::user_hint`] 获取,不暴露底层错误细节。
+//! User-facing text is always obtained through [`SourceError::user_message`] and
+//! [`SourceError::user_hint`]; underlying error details are never exposed.
 
 use thiserror::Error;
 
-/// 数据源错误。区分类型,以便 UI 给出针对性的提示。
+/// A data-source error. Variants are split so the UI can show a targeted message.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SourceError {
-    /// 请求过于频繁(处于退避期内)
+    /// Requested too frequently (within the backoff window)
     #[error("请求过于频繁")]
     Throttled,
-    /// 无法建立网络连接(连接被拒、DNS 失败等)
+    /// Could not establish a network connection (connection refused, DNS failure, etc.)
     #[error("无法连接到服务器")]
     Network,
-    /// 已建立连接但响应体读取中断(下载超时、连接被重置)
+    /// Connection established, but reading the response body was interrupted
+    /// (download timeout, connection reset)
     #[error("加载中断")]
     Interrupted,
-    /// 服务器返回错误状态码(4xx / 5xx)
+    /// Server returned an error status code (4xx / 5xx)
     #[error("服务器返回错误状态码 {0}")]
     Server(u16),
-    /// 响应内容解码失败(非预期编码)
+    /// Response body failed to decode (unexpected encoding)
     #[error("响应内容解码失败")]
     Decode,
-    /// 图片超过大小上限
+    /// Image exceeds the size limit
     #[error("图片大小超过限制")]
     ImageTooLarge,
-    /// 写入本地缓存失败
+    /// Failed to write to the local cache
     #[error("写入本地缓存失败")]
     Cache,
 }
 
 impl SourceError {
-    /// 面向用户的简要说明(不含技术细节)
+    /// Short user-facing description (no technical details)
     pub fn user_message(&self) -> &'static str {
         match self {
             SourceError::Throttled => "请求过于频繁",
@@ -45,7 +46,7 @@ impl SourceError {
         }
     }
 
-    /// 用户需要检查 / 采取的下一步
+    /// What the user should check / do next
     pub fn user_hint(&self) -> &'static str {
         match self {
             SourceError::Throttled => "请稍后重试",

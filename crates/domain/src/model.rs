@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 
-/// 番剧类型（有限状态）。
+use crate::id::{BangumiId, SubgroupId};
+
+/// Kind of anime (finite state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum BangumiKind {
-    /// 未提供 / 无法识别（容错）
+    /// Not provided or unrecognized (defensive fallback).
     #[default]
     Other,
     Tv,
@@ -12,7 +14,7 @@ pub enum BangumiKind {
     Movie,
 }
 
-/// 更新星期（有限状态）。
+/// Update weekday (finite state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Weekday {
     Mon,
@@ -25,7 +27,7 @@ pub enum Weekday {
 }
 
 impl Weekday {
-    /// 首页分组使用的稳定 key。
+    /// Stable key used for home-page grouping.
     pub fn key(self) -> &'static str {
         match self {
             Weekday::Mon => "monday",
@@ -38,7 +40,7 @@ impl Weekday {
         }
     }
 
-    /// 展示名。
+    /// User-facing display name.
     pub fn label(self) -> &'static str {
         match self {
             Weekday::Mon => "星期一",
@@ -52,7 +54,7 @@ impl Weekday {
     }
 }
 
-/// 放送季度名（有限状态）。
+/// Broadcast season name (finite state).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SeasonName {
     Spring,
@@ -61,17 +63,19 @@ pub enum SeasonName {
     Winter,
 }
 
-/// 放送季度。
+/// Broadcast season (year plus season name).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Season {
     pub year: i32,
     pub season: SeasonName,
 }
 
+/// A single anime entry with its subtitle groups and schedule metadata.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BangumiItem {
     pub name: String,
-    pub bangumi_id: Option<u32>,
+    /// Stable identity. Required: an entry without a bangumi id is not a Bangumi.
+    pub bangumi_id: BangumiId,
     pub cover_url: Option<String>,
     pub detail_url: Option<String>,
     pub meta: Option<BangumiMeta>,
@@ -79,18 +83,20 @@ pub struct BangumiItem {
     pub subtitle_groups: Vec<SubtitleGroup>,
     #[serde(default)]
     pub update_date: Option<String>,
-    /// 番剧类型（TV/WEB/OVA/剧场版）。
+    /// Anime kind (TV / WEB / OVA / movie).
     #[serde(default)]
     pub kind: BangumiKind,
-    /// 所属季度。
+    /// Seasons this anime belongs to.
     #[serde(default)]
     pub seasons: Vec<Season>,
-    /// 各字幕组最近发布时间(取最大值);为 `None` 表示该番剧下没有任何
-    /// 已发布剧集(首页据此灰显不可点)。
+    /// Latest publish time across all subtitle groups (the maximum). `None`
+    /// means the anime has no published episodes (the home page greys it out
+    /// and disables it).
     #[serde(default)]
     pub updated_at: Option<String>,
 }
 
+/// Anime items grouped under one update day (a home-page section).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BangumiGroup {
     pub day: String,
@@ -98,6 +104,7 @@ pub struct BangumiGroup {
     pub items: Vec<BangumiItem>,
 }
 
+/// Extra metadata fetched from an anime's detail page.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BangumiMeta {
     #[serde(default)]
@@ -114,33 +121,39 @@ pub struct BangumiMeta {
     pub summary: Option<String>,
 }
 
+/// A fansub group offering episodes for one anime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubtitleGroup {
     pub name: String,
+    /// Subtitle group id, or [`SubgroupId::UNKNOWN`] when the API hasn't assigned one.
     #[serde(default)]
-    pub subgroup_id: Option<u32>,
+    pub subgroup_id: SubgroupId,
     #[serde(default)]
     pub subscription_url: Option<String>,
-    /// 剧集列表。列表/详情 API 不含剧集,由 RSS 按需加载后填充(默认留空)。
+    /// Episode list. The list/detail APIs omit episodes, so entries are filled
+    /// in lazily from RSS (empty by default).
     #[serde(default)]
     pub episodes: Vec<Episode>,
-    /// 该字幕组的剧集总数（来自 API；`episodes` 为懒加载，未加载时为 0）。
+    /// Total episode count for this subtitle group (from the API; `episodes`
+    /// is lazily loaded, so this stays 0 until it has been loaded).
     #[serde(default)]
     pub episode_count: u32,
-    /// 该组最近发布时间。
+    /// Latest publish time for this group.
     #[serde(default)]
     pub latest_published_at: Option<String>,
 }
 
+/// A user subscription to one subtitle group of an anime.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subscription {
-    pub bangumi_id: u32,
-    pub subgroup_id: u32,
+    pub bangumi_id: BangumiId,
+    pub subgroup_id: SubgroupId,
     pub bangumi_name: String,
     pub group_name: String,
     pub cover_url: Option<String>,
 }
 
+/// A single downloadable episode.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Episode {
     pub title: String,
@@ -150,14 +163,15 @@ pub struct Episode {
     pub size: Option<String>,
     #[serde(default)]
     pub publish_date: Option<String>,
-    /// info hash（来自 API/RSS）。
+    /// Info hash (from the API or RSS).
     #[serde(default)]
     pub hash: Option<String>,
-    /// `.torrent` 直链（来自 API/RSS）。
+    /// Direct `.torrent` link (from the API or RSS).
     #[serde(default)]
     pub torrent_url: Option<String>,
 }
 
+/// An episode result returned by a keyword search.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchEpisode {
     pub title: String,
@@ -166,6 +180,7 @@ pub struct SearchEpisode {
     pub date: String,
 }
 
+/// Combined results of a keyword search (anime and episodes).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SearchResults {
     pub items: Vec<BangumiItem>,

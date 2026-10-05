@@ -1,10 +1,13 @@
-//! 验证剧集行的 60/40 flex 布局行为(gpui 0.2.2)。
+//! Verifies the 60/40 flex layout of an episode row (gpui 0.2.2).
 //!
-//! 设计要求:文本列固定 60%(超长截断省略),操作列固定 40%(下载区右对齐)。
+//! Design requirement: the text column is fixed at 60% (overlong text is
+//! truncated with an ellipsis) and the action column is fixed at 40% (the
+//! download area is right-aligned).
 
 use gpui_kit::component::StyledExt;
 use gpui_kit::{Context, Render, Size, VisualTestContext, Window, div, prelude::*, px, relative};
 
+/// Renders a realistic card: a header row plus a single episode row.
 struct RowFixture {
     title: String,
     keyword: String,
@@ -12,7 +15,7 @@ struct RowFixture {
 
 impl Render for RowFixture {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // 模拟真实结构:卡片容器(标题行 + 剧集行)
+        // Mimics the real structure: a card container (header row + episode row).
         div()
             .id("card")
             .debug_selector(|| "card".to_string())
@@ -21,7 +24,7 @@ impl Render for RowFixture {
             .overflow_hidden()
             .border_1()
             .child(
-                // 标题行:「剧集列表」+ 筛选按钮(两端分布)
+                // Header row: "剧集列表" plus the filter button, spread to both ends.
                 div()
                     .id("list-header")
                     .debug_selector(|| "list-header".to_string())
@@ -61,7 +64,7 @@ impl Render for RowFixture {
                     ),
             )
             .child(
-                // 剧集行:60% 文本 + 40% 操作区
+                // Episode row: 60% text column + 40% action column.
                 div()
                     .id("row-root")
                     .debug_selector(|| "row-root".to_string())
@@ -105,7 +108,7 @@ impl Render for RowFixture {
                             .items_center()
                             .justify_end()
                             .child(
-                                // 模拟下载中状态:百分比 + 双速度 + 取消
+                                // Simulates the downloading state: percent + two speeds + cancel.
                                 div()
                                     .id("btn-area")
                                     .debug_selector(|| "btn-area".to_string())
@@ -123,6 +126,7 @@ impl Render for RowFixture {
     }
 }
 
+/// Opens a fixture window of the given width and returns its visual test context.
 fn setup(
     cx: &mut gpui_kit::TestAppContext,
     width: f32,
@@ -146,6 +150,7 @@ fn setup(
     cx
 }
 
+/// Asserts the 60/40 split, no overflow, and right-alignment of the download area.
 fn check(cx: &mut VisualTestContext, label: &str) {
     let root = cx.debug_bounds("row-root").expect("row-root laid out");
     let title_col = cx.debug_bounds("title-col").expect("title-col laid out");
@@ -160,7 +165,7 @@ fn check(cx: &mut VisualTestContext, label: &str) {
         .expect("list-header laid out");
     let filter_btn = cx.debug_bounds("filter-btn").expect("filter-btn laid out");
 
-    // 行内可用宽度(去掉左右 padding 28)
+    // Usable row width (minus 28px of left/right padding).
     let row_inner: f32 = (root.size.width - px(28.)).into();
     let title_ratio: f32 = title_col.size.width.into();
     let btn_ratio: f32 = btn_col.size.width.into();
@@ -185,7 +190,7 @@ fn check(cx: &mut VisualTestContext, label: &str) {
     );
     println!("[{label}] header={header:?} filter_btn={filter_btn:?}");
 
-    // 60/40 比例(容忍 1% 误差)
+    // 60/40 ratio (tolerating a 1% error).
     assert!(
         (title_ratio - 0.6).abs() < 0.01,
         "[{label}] 文本列应占 60%,实际 {title_ratio:.2}"
@@ -195,7 +200,7 @@ fn check(cx: &mut VisualTestContext, label: &str) {
         "[{label}] 操作列应占 40%,实际 {btn_ratio:.2}"
     );
 
-    // 无溢出
+    // No overflow.
     assert!(
         btn_right <= container_right + px(0.1),
         "[{label}] 操作列被挤出容器:btn_right={btn_right:?} > container_right={container_right:?}"
@@ -205,7 +210,7 @@ fn check(cx: &mut VisualTestContext, label: &str) {
         "[{label}] 筛选按钮超出标题行:filter_right={filter_right:?} > header_right={header_right:?}"
     );
 
-    // 下载区右对齐:按钮区域右缘与操作列右缘一致
+    // Download area right-aligned: the button area's right edge matches the action column's right edge.
     assert!(
         (btn_area_right - btn_right).abs() < px(0.1),
         "[{label}] 下载区应右对齐:btn_area_right={btn_area_right:?} != btn_col_right={btn_right:?}"
@@ -216,18 +221,21 @@ const LONG_TITLE: &str = "【某某字幕组】这个番剧的名字真的非常
 const LONG_ASCII_TITLE: &str = "[SomeFanSub] Some.Anime.Title.S2.E01.1080p.WEB-DL.AAC.x264-SomeFanSub.ThisIsAReallyLongFileNameThatNeverBreaks";
 const LONG_KEYWORD: &str = "关键词也非常非常长以至于筛选按钮肯定放不下需要截断";
 
+/// The 60/40 layout holds in an 800px-wide window with long Chinese text.
 #[gpui_kit::test]
 async fn sixty_forty_wide_window(cx: &mut gpui_kit::TestAppContext) {
     let mut cx = setup(cx, 800., LONG_TITLE, LONG_KEYWORD);
     check(&mut cx, "wide");
 }
 
+/// The 60/40 layout holds in a 420px-wide window with long Chinese text.
 #[gpui_kit::test]
 async fn sixty_forty_narrow_window(cx: &mut gpui_kit::TestAppContext) {
     let mut cx = setup(cx, 420., LONG_TITLE, LONG_KEYWORD);
     check(&mut cx, "narrow");
 }
 
+/// The 60/40 layout holds in a 500px-wide window with a long unbreakable ASCII title.
 #[gpui_kit::test]
 async fn sixty_forty_ascii_title(cx: &mut gpui_kit::TestAppContext) {
     let mut cx = setup(cx, 500., LONG_ASCII_TITLE, LONG_KEYWORD);

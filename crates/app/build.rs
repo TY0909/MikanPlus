@@ -1,5 +1,5 @@
-// 将应用图标嵌入 Windows 可执行文件(资源管理器 / 任务栏显示)。
-// 仅 Windows 生效;图标文件缺失时静默跳过,不影响开发构建。
+// Embed the application icon into the Windows executable (shown in Explorer / the taskbar).
+// Only takes effect on Windows; when the icon file is missing it is skipped silently, so it does not affect development builds.
 fn main() {
     #[cfg(target_os = "windows")]
     {

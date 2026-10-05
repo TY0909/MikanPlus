@@ -1,619 +1,289 @@
-//! 蜜柑计划网络层。
+//! Mikan network client.
 //!
-//! 访问策略(核心诉求:尽可能少地访问服务器):
-//! - **节流**:全局请求间最小间隔,避免突发流量
-//! - **退避**:失败后一段时间内不再请求同一资源(指数级)
-//! - **并发克制**:最多 2 个在途请求
-//! - **去重**:同一 URL 同时只允许一个下载任务(图片管理器保证)
-//! - 缓存命中(见 cache.rs)时根本不会走到这里
+//! Access policy (core goal: hit the servers as little as possible):
+//! - **Throttling**: a global minimum interval between requests, to avoid bursts
+//! - **Backoff**: after a failure, stop requesting the same resource for a while (exponential)
+//! - **Restrained concurrency**: at most 2 requests in flight
+//! - **Deduplication**: only one download task per URL at a time (the image task table)
+//! - On a cache hit (see `storage::cache`) execution never reaches this layer
+//!
+//! All of the layer's state lives in one [`Network`]: the shared connection pool, the request
+//! rhythm (throttle / backoff / concurrency), the image task table, and the selected data source.
+//! The submodules hold pure helpers and the state types only.
 
-use std::{
-    collections::HashMap,
-    io::Read,
-    sync::{
-        Mutex,
-        atomic::{AtomicBool, AtomicU64, Ordering},
-    },
-    time::{Duration, Instant},
-};
+mod endpoints;
+mod http;
+mod image;
+mod throttle;
 
-use crate::error::SourceError;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock};
+use std::time::Instant;
 
-/// 站点根地址(默认主站)
-pub const BASE_URL: &str = "https://mikanani.me";
-/// 备用域名:国内可直连(对国内 IP 直接出内容;海外访问 302 回主站,两域名同源)
-pub const BACKUP_BASE_URL: &str = "https://mikanime.tv";
+use crate::SourceError;
+use throttle::Throttle;
 
-/// 是否启用备用域名(进程级)。网络请求在后台线程执行,切换即时生效;
-/// 启动时由设置值恢复,在设置页切换后持久化。
-static USE_BACKUP_DOMAIN: AtomicBool = AtomicBool::new(false);
+pub use image::ImgStatus;
 
-/// 图片抓取上次成功的主机是否为「另一侧」(见 [`fetch_image_bytes`])。
-static IMAGE_USE_ALTERNATE: AtomicBool = AtomicBool::new(false);
-
-/// 设置是否使用备用域名
-pub fn set_backup_domain(enabled: bool) {
-    USE_BACKUP_DOMAIN.store(enabled, Ordering::Relaxed);
-    // 数据源切换后重新探测图片可用主机
-    IMAGE_USE_ALTERNATE.store(false, Ordering::Relaxed);
+/// The Mikan network client: owns the connection pool and all request / image / data-source state.
+pub struct Network {
+    /// Shared `ureq` agent (connection pool), built lazily on the first request.
+    agent: OnceLock<ureq::Agent>,
+    /// Request rhythm (throttle / backoff / concurrency).
+    throttle: Mutex<Throttle>,
+    /// Image task table: url → status
+    images: Mutex<HashMap<String, ImgStatus>>,
+    /// Image failure-time table: url → failure instant (retry allowed after the cooldown)
+    image_errors: Mutex<HashMap<String, Instant>>,
+    /// Image download task version: incremented when the image cache changes, for UI polling.
+    image_version: AtomicU64,
+    /// Whether the host of the last successful image fetch was the "alternate" side.
+    image_use_alternate: AtomicBool,
+    /// Whether the backup data-source domain is enabled.
+    use_backup_domain: AtomicBool,
 }
 
-/// 当前是否使用备用域名
-pub fn use_backup_domain() -> bool {
-    USE_BACKUP_DOMAIN.load(Ordering::Relaxed)
-}
-
-/// 当前选中的数据源根地址
-pub fn base_url() -> &'static str {
-    if use_backup_domain() {
-        BACKUP_BASE_URL
-    } else {
-        BASE_URL
+impl Default for Network {
+    fn default() -> Self {
+        Self {
+            agent: OnceLock::new(),
+            throttle: Mutex::new(Throttle::new()),
+            images: Mutex::new(HashMap::new()),
+            image_errors: Mutex::new(HashMap::new()),
+            image_version: AtomicU64::new(0),
+            image_use_alternate: AtomicBool::new(false),
+            use_backup_domain: AtomicBool::new(false),
+        }
     }
 }
 
-/// 把已知数据源主机(主站 / 备用)的 URL 改写到当前选中的数据源主机。
-/// 用于兜底历史缓存 / 订阅中按旧域名保存的绝对地址,切换域名后依然可用。
-pub fn normalize_url(url: &str) -> String {
-    rewrite_host(url, base_url())
-}
+impl Network {
+    /// Creates a network client. The connection pool is built lazily on the first request.
+    pub fn new() -> Self {
+        Self::default()
+    }
 
-/// 纯函数:把 url 中任一已知数据源主机替换为 base 主机(便于测试)。
-/// 仅在主机后是空串或路径时替换,避免误伤同前缀的其它域名。
-fn rewrite_host(url: &str, base: &str) -> String {
-    [BASE_URL, BACKUP_BASE_URL]
-        .iter()
-        .find_map(|host| {
-            url.strip_prefix(host)
-                .filter(|rest| rest.is_empty() || rest.starts_with('/'))
-                .map(|rest| format!("{base}{rest}"))
-        })
-        .unwrap_or_else(|| url.to_string())
-}
+    /// The shared connection pool (built on first use).
+    fn agent(&self) -> &ureq::Agent {
+        self.agent.get_or_init(http::build_agent)
+    }
 
-/// 同一路径在另一数据源主机下的 URL。
-///
-/// 用于图片抓取的回退:备用域名 `mikanime.tv` 对图片会 302 回主站,但其
-/// `Location` 把路径小写化(`/images/Bangumi` → `/images/bangumi`),主站大小写敏感
-/// 会返回 404;反向地,主站不可达时备用域名可直连。返回 `None` 表示 URL 不是
-/// 任一已知数据源主机下的地址。
-///
-/// 图片缓存键与主机无关(见 `storage::cache::image_key`),因此任一主机命中的结果
-/// 都写入同一份缓存。
-pub fn alternate_url(url: &str) -> Option<String> {
-    [BASE_URL, BACKUP_BASE_URL].iter().find_map(|host| {
-        url.strip_prefix(host)
-            .filter(|rest| rest.is_empty() || rest.starts_with('/'))
-            .map(|rest| {
-                let other = if *host == BASE_URL {
-                    BACKUP_BASE_URL
-                } else {
-                    BASE_URL
-                };
-                format!("{other}{rest}")
-            })
-    })
-}
+    // ---- transport ----
 
-/// 请求间最小间隔
-const MIN_INTERVAL: Duration = Duration::from_millis(300);
-/// 失败后的基础退避时间
-const BACKOFF_BASE: Duration = Duration::from_secs(30);
-/// 最大并发请求数
-const MAX_CONCURRENCY: usize = 2;
-
-/// 请求总超时(覆盖连接与整个响应体下载;请求在后台线程执行,放宽不会卡 UI)
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(60);
-/// TCP 连接超时
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
-
-/// 用户代理:表明身份,遵守礼仪
-const USER_AGENT: &str = "MikanPlus/0.1 (+https://mikanani.me)";
-
-struct NetState {
-    /// 上次请求时间(节流)
-    last_request: Option<Instant>,
-    /// 正在进行的请求数
-    inflight: usize,
-    /// 退避表:url → 允许再次请求的最早时间
-    backoff: HashMap<String, Instant>,
-    /// 连续失败次数(全局退避放大)
-    fail_streak: u32,
-}
-
-static STATE: Mutex<Option<NetState>> = Mutex::new(None);
-
-/// 图片下载任务版本号:图片缓存变化时递增,供 UI 轮询刷新
-static IMAGE_VERSION: AtomicU64 = AtomicU64::new(0);
-
-pub fn image_version() -> u64 {
-    IMAGE_VERSION.load(Ordering::Relaxed)
-}
-
-pub fn bump_image_version() {
-    IMAGE_VERSION.fetch_add(1, Ordering::Relaxed);
-}
-
-/// 图片状态:同一 URL 同时只允许一个下载任务(去重)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ImgStatus {
-    /// 尚未下载
-    Pending,
-    /// 下载中
-    Loading,
-    /// 已下载(缓存文件已就绪)
-    Loaded,
-    /// 下载失败(冷却后允许重试)
-    Error,
-}
-
-/// 图片任务表:url → 状态
-static IMAGES: Mutex<Option<HashMap<String, ImgStatus>>> = Mutex::new(None);
-
-/// 图片失败时间表:url → 失败时刻(冷却期后允许重试)
-static IMAGE_ERRORS: Mutex<Option<HashMap<String, Instant>>> = Mutex::new(None);
-
-/// 图片失败后的重试冷却期
-const IMAGE_RETRY_COOLDOWN: Duration = Duration::from_secs(60);
-
-/// 查询图片状态
-pub fn image_status(url: &str) -> ImgStatus {
-    let mut guard = IMAGES.lock().unwrap();
-    let map = guard.get_or_insert_with(HashMap::new);
-    map.get(url).copied().unwrap_or(ImgStatus::Pending)
-}
-
-/// 尝试认领下载任务:同一 URL 只有第一个调用返回 true;
-/// 失败态在冷却期结束后允许重新认领(自动重试)。
-pub fn claim_image(url: &str) -> bool {
-    let mut guard = IMAGES.lock().unwrap();
-    let map = guard.get_or_insert_with(HashMap::new);
-    match map.get(url) {
-        Some(ImgStatus::Pending) | None => {
-            map.insert(url.to_string(), ImgStatus::Loading);
-            true
+    /// Fetches an HTML page (with throttling / backoff / concurrency control). Returns
+    /// [`SourceError::Throttled`] while in backoff.
+    pub fn fetch_html(&self, url: &str) -> Result<String, SourceError> {
+        if self.in_backoff(url) {
+            return Err(SourceError::Throttled);
         }
-        Some(ImgStatus::Error) => {
-            let cooldown_ok = IMAGE_ERRORS
-                .lock()
-                .unwrap()
-                .as_ref()
-                .and_then(|m| m.get(url))
-                .is_none_or(|at| Instant::now().duration_since(*at) >= IMAGE_RETRY_COOLDOWN);
-            if cooldown_ok {
-                map.insert(url.to_string(), ImgStatus::Loading);
-                true
-            } else {
-                false
+        self.acquire_slot();
+        let result = http::get_html(self.agent(), url);
+        self.release_slot();
+        self.record(url, &result);
+        result
+    }
+
+    /// Downloads binary content (images). With throttling / backoff / concurrency control; returns
+    /// [`SourceError::Throttled`] while in backoff.
+    pub fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, SourceError> {
+        if self.in_backoff(url) {
+            return Err(SourceError::Throttled);
+        }
+        self.acquire_slot();
+        let result = http::get_bytes(self.agent(), url);
+        self.release_slot();
+        self.record(url, &result);
+        result
+    }
+
+    /// Clears the backoff state for the given URL (user-initiated retry).
+    pub fn reset_backoff(&self, url: &str) {
+        self.throttle.lock().unwrap().reset_backoff(url);
+    }
+
+    fn in_backoff(&self, url: &str) -> bool {
+        self.throttle.lock().unwrap().in_backoff(url)
+    }
+
+    /// Waits for the global throttle interval and a concurrency slot (blocks the current thread;
+    /// call only on background threads).
+    fn acquire_slot(&self) {
+        loop {
+            if self.throttle.lock().unwrap().try_acquire() {
+                break;
             }
+            std::thread::sleep(std::time::Duration::from_millis(30));
         }
-        _ => false,
     }
-}
 
-/// 记录图片下载结果
-pub fn finish_image(url: &str, ok: bool) {
-    let mut guard = IMAGES.lock().unwrap();
-    let map = guard.get_or_insert_with(HashMap::new);
-    map.insert(
-        url.to_string(),
-        if ok {
-            ImgStatus::Loaded
-        } else {
-            ImgStatus::Error
-        },
-    );
-    if !ok {
-        IMAGE_ERRORS
+    fn release_slot(&self) {
+        self.throttle.lock().unwrap().release_slot();
+    }
+
+    fn record<T>(&self, url: &str, result: &Result<T, SourceError>) {
+        let mut throttle = self.throttle.lock().unwrap();
+        match result {
+            Ok(_) => throttle.note_success(),
+            Err(_) => throttle.note_failure(url),
+        }
+    }
+
+    // ---- images ----
+
+    /// The current image download task version (for UI polling).
+    pub fn image_version(&self) -> u64 {
+        self.image_version.load(Ordering::Relaxed)
+    }
+
+    /// Queries the image status.
+    pub fn image_status(&self, url: &str) -> ImgStatus {
+        self.images
             .lock()
             .unwrap()
-            .get_or_insert_with(HashMap::new)
-            .insert(url.to_string(), Instant::now());
+            .get(url)
+            .copied()
+            .unwrap_or(ImgStatus::Pending)
     }
-    bump_image_version();
-}
 
-/// 该 URL 是否在退避期内(过期条目惰性清理,保证退避表有界)
-fn in_backoff(url: &str) -> bool {
-    with_state(|s| match s.backoff.get(url) {
-        Some(until) if Instant::now() >= *until => {
-            s.backoff.remove(url);
-            false
-        }
-        Some(_) => true,
-        None => false,
-    })
-}
-
-/// 清除指定 URL 的退避状态(用户主动发起请求前调用,如点击「重试」)。
-/// 退避仅用于抑制程序自动重试;用户明确的操作应立即放行。
-pub fn reset_backoff(url: &str) {
-    with_state(|s| {
-        s.backoff.remove(url);
-    });
-}
-
-/// 对全局状态执行一次操作
-fn with_state<T>(f: impl FnOnce(&mut NetState) -> T) -> T {
-    let mut guard = STATE.lock().unwrap();
-    let state = guard.get_or_insert_with(|| NetState {
-        last_request: None,
-        inflight: 0,
-        backoff: HashMap::new(),
-        fail_streak: 0,
-    });
-    f(state)
-}
-
-/// 等待全局节流间隔与并发槽(阻塞当前线程,仅在后台线程调用)。
-///
-/// 并发检查与节流检查在同一临界区内完成,保证「最多 N 个在途请求」
-/// 不变量严格成立(两段式检查存在竞态窗口)。
-fn acquire_slot() {
-    loop {
-        let now = Instant::now();
-        let ok = with_state(|s| {
-            if s.inflight >= MAX_CONCURRENCY {
-                return false;
+    /// Tries to claim the download task: only the first call for a given URL returns true; in the
+    /// failure state, re-claiming is allowed once the cooldown has elapsed (automatic retry).
+    pub fn claim_image(&self, url: &str) -> bool {
+        let mut images = self.images.lock().unwrap();
+        match images.get(url) {
+            Some(ImgStatus::Pending) | None => {
+                images.insert(url.to_string(), ImgStatus::Loading);
+                true
             }
-            match s.last_request {
-                Some(last) if now.duration_since(last) < MIN_INTERVAL => false,
-                _ => {
-                    s.last_request = Some(now);
-                    s.inflight += 1;
+            Some(ImgStatus::Error) => {
+                let cooldown_ok = self.image_errors.lock().unwrap().get(url).is_none_or(|at| {
+                    Instant::now().duration_since(*at) >= image::IMAGE_RETRY_COOLDOWN
+                });
+                if cooldown_ok {
+                    images.insert(url.to_string(), ImgStatus::Loading);
                     true
+                } else {
+                    false
                 }
             }
-        });
-        if ok {
-            break;
+            _ => false,
         }
-        std::thread::sleep(Duration::from_millis(30));
     }
-}
 
-fn release_slot() {
-    with_state(|s| s.inflight -= 1);
-}
+    /// Records the image download result.
+    pub fn finish_image(&self, url: &str, ok: bool) {
+        self.images.lock().unwrap().insert(
+            url.to_string(),
+            if ok {
+                ImgStatus::Loaded
+            } else {
+                ImgStatus::Error
+            },
+        );
+        if !ok {
+            self.image_errors
+                .lock()
+                .unwrap()
+                .insert(url.to_string(), Instant::now());
+        }
+        self.image_version.fetch_add(1, Ordering::Relaxed);
+    }
 
-/// 记录失败:对该 URL 退避(时长随全局连续失败次数放大),并更新连续失败计数
-fn note_failure(url: &str) {
-    with_state(|s| {
-        s.fail_streak += 1;
-        let factor = 1u32 << s.fail_streak.min(4); // 30s → 60s → 120s → 240s → 480s
-        let until = Instant::now() + BACKOFF_BASE * factor;
-        s.backoff.insert(url.to_string(), until);
-    });
-}
-
-fn note_success() {
-    with_state(|s| s.fail_streak = 0);
-}
-
-/// 全局共享的 ureq Agent(复用连接池,避免每请求重建)
-static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
-
-fn agent() -> ureq::Agent {
-    AGENT
-        .get_or_init(|| {
-            let mut builder = ureq::AgentBuilder::new()
-                .timeout(REQUEST_TIMEOUT)
-                .timeout_connect(CONNECT_TIMEOUT)
-                .user_agent(USER_AGENT);
-            // 代理:环境变量优先,macOS 系统代理兜底(进程内只探测一次)
-            if let Some(proxy) = env_proxy().or_else(system_proxy) {
-                builder = builder.proxy(proxy);
+    /// Fetches an image: tries the current data-source host first, falls back to the other host on
+    /// failure, and remembers which side last succeeded so later covers need not repeat a failing
+    /// request. The cache key is host-independent, so both attempts share one cache entry.
+    pub fn fetch_image_bytes(&self, url: &str) -> Result<Vec<u8>, SourceError> {
+        let alternate = endpoints::alternate_url(url);
+        let (first, second, first_is_alternate) = match alternate {
+            Some(alt) if self.image_use_alternate.load(Ordering::Relaxed) => {
+                (alt, url.to_string(), true)
             }
-            builder.build()
-        })
-        .clone()
-}
-
-/// 环境变量代理(HTTPS_PROXY / HTTP_PROXY / ALL_PROXY)
-fn env_proxy() -> Option<ureq::Proxy> {
-    for var in [
-        "HTTPS_PROXY",
-        "https_proxy",
-        "HTTP_PROXY",
-        "http_proxy",
-        "ALL_PROXY",
-        "all_proxy",
-    ] {
-        if let Ok(v) = std::env::var(var)
-            && !v.trim().is_empty()
-            && let Ok(p) = ureq::Proxy::new(v.trim())
-        {
-            return Some(p);
-        }
-    }
-    None
-}
-
-/// macOS 系统代理(网络设置 → 代理;通过 scutil --proxy 读取)
-#[cfg(target_os = "macos")]
-fn system_proxy() -> Option<ureq::Proxy> {
-    let out = std::process::Command::new("scutil")
-        .arg("--proxy")
-        .output()
-        .ok()?;
-    let text = String::from_utf8(out.stdout).ok()?;
-    for (enable, host_key, port_key) in [
-        ("HTTPSEnable", "HTTPSProxy", "HTTPSPort"),
-        ("HTTPEnable", "HTTPProxy", "HTTPPort"),
-    ] {
-        if !line_bool(&text, enable) {
-            continue;
-        }
-        let Some(host) = line_value(&text, host_key) else {
-            continue;
+            Some(alt) => (url.to_string(), alt, false),
+            None => (url.to_string(), String::new(), false),
         };
-        let Some(port) = line_value(&text, port_key) else {
-            continue;
-        };
-        let url = format!("http://{host}:{port}");
-        if let Ok(p) = ureq::Proxy::new(url) {
-            return Some(p);
-        }
-    }
-    None
-}
-
-#[cfg(not(target_os = "macos"))]
-fn system_proxy() -> Option<ureq::Proxy> {
-    None
-}
-
-/// 读取 scutil 输出中 `Key : value` 的值
-#[cfg(target_os = "macos")]
-fn line_value(text: &str, key: &str) -> Option<String> {
-    text.lines()
-        .find(|l| l.trim_start().starts_with(key))
-        .and_then(|l| l.split_once(':'))
-        .map(|(_, v)| v.trim().to_string())
-        .filter(|v| !v.is_empty())
-}
-
-/// scutil 布尔值是否为 1
-#[cfg(target_os = "macos")]
-fn line_bool(text: &str, key: &str) -> bool {
-    line_value(text, key).is_some_and(|v| v == "1")
-}
-
-/// 将 ureq 的错误映射为可分发的错误类型。
-fn map_ureq_error(e: ureq::Error) -> SourceError {
-    match e {
-        ureq::Error::Status(code, _) => SourceError::Server(code),
-        ureq::Error::Transport(_) => SourceError::Network,
-    }
-}
-
-/// 读取并解码响应体为 UTF-8 字符串。
-///
-/// 区分两类失败:读取出错(超时 / 连接中断)属于传输层,归类为
-/// [`Interrupted`](SourceError::Interrupted);只有响应体字节本身非法
-/// (或超出上限)才归类为 [`Decode`](SourceError::Decode)。
-fn read_html_body(response: ureq::Response) -> Result<String, SourceError> {
-    // 蜜柑搜索结果页一次返回全部匹配剧集,体积可达数 MB,上限放宽到 32MB
-    const MAX_HTML_BYTES: usize = 32 * 1024 * 1024;
-    let mut buf: Vec<u8> = Vec::new();
-    response
-        .into_reader()
-        .take((MAX_HTML_BYTES + 1) as u64)
-        .read_to_end(&mut buf)
-        .map_err(|_| SourceError::Interrupted)?;
-    if buf.len() > MAX_HTML_BYTES {
-        return Err(SourceError::Decode);
-    }
-    // 源站页面为 UTF-8;仅在字节本身非法时才按解码失败处理
-    String::from_utf8(buf).map_err(|_| SourceError::Decode)
-}
-
-/// 抓取 HTML 页面(带节流/退避/并发控制)。退避期内返回 Err。
-pub fn fetch_html(url: &str) -> Result<String, SourceError> {
-    if in_backoff(url) {
-        return Err(SourceError::Throttled);
-    }
-    acquire_slot();
-    let result = agent()
-        .get(url)
-        .call()
-        .map_err(map_ureq_error)
-        .and_then(read_html_body);
-    release_slot();
-    match result {
-        Ok(text) => {
-            note_success();
-            Ok(text)
-        }
-        Err(e) => {
-            note_failure(url);
-            Err(e)
-        }
-    }
-}
-
-/// 下载二进制内容(图片)。带节流/退避/并发控制;退避期内返回 Err。
-/// 超过大小上限时返回 Err(不缓存、不标记成功),避免静默截断。
-const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
-
-pub fn fetch_bytes(url: &str) -> Result<Vec<u8>, SourceError> {
-    if in_backoff(url) {
-        return Err(SourceError::Throttled);
-    }
-    acquire_slot();
-    let result = agent()
-        .get(url)
-        .call()
-        .map_err(map_ureq_error)
-        .and_then(|r| {
-            // 多读 1 字节以检测截断:超限必须显式报错
-            let mut buf: Vec<u8> = Vec::new();
-            r.into_reader()
-                .take((MAX_IMAGE_BYTES + 1) as u64)
-                .read_to_end(&mut buf)
-                .map_err(|_| SourceError::Interrupted)?;
-            if buf.len() > MAX_IMAGE_BYTES {
-                return Err(SourceError::ImageTooLarge);
+        match self.fetch_bytes(&first) {
+            Ok(bytes) => {
+                self.image_use_alternate
+                    .store(first_is_alternate, Ordering::Relaxed);
+                Ok(bytes)
             }
-            Ok(buf)
-        });
-    release_slot();
-    match result {
-        Ok(bytes) => {
-            note_success();
-            Ok(bytes)
-        }
-        Err(e) => {
-            note_failure(url);
-            Err(e)
-        }
-    }
-}
-
-/// 抓取图片:先试当前数据源主机,失败回退另一主机,并记住上次成功的一侧,
-/// 使后续封面不必重复一次失败请求。
-///
-/// 备用域名对图片的 302 会把路径小写化(`/images/Bangumi` → `/images/bangumi`),
-/// 主站大小写敏感返回 404;反之上不可达时备用域名可直连。图片缓存键与主机无关
-/// (见 `storage::cache::image_key`),由调用方统一存储,两次尝试命中同一份缓存。
-pub fn fetch_image_bytes(url: &str) -> Result<Vec<u8>, SourceError> {
-    let alternate = alternate_url(url);
-    let (first, second, first_is_alternate) = match alternate {
-        Some(alt) if IMAGE_USE_ALTERNATE.load(Ordering::Relaxed) => (alt, url.to_string(), true),
-        Some(alt) => (url.to_string(), alt, false),
-        None => (url.to_string(), String::new(), false),
-    };
-    match fetch_bytes(&first) {
-        Ok(bytes) => {
-            IMAGE_USE_ALTERNATE.store(first_is_alternate, Ordering::Relaxed);
-            Ok(bytes)
-        }
-        Err(first_err) => {
-            if second.is_empty() {
-                return Err(first_err);
-            }
-            match fetch_bytes(&second) {
-                Ok(bytes) => {
-                    IMAGE_USE_ALTERNATE.store(!first_is_alternate, Ordering::Relaxed);
-                    Ok(bytes)
+            Err(first_err) => {
+                if second.is_empty() {
+                    return Err(first_err);
                 }
-                Err(_) => Err(first_err),
+                match self.fetch_bytes(&second) {
+                    Ok(bytes) => {
+                        self.image_use_alternate
+                            .store(!first_is_alternate, Ordering::Relaxed);
+                        Ok(bytes)
+                    }
+                    Err(_) => Err(first_err),
+                }
             }
         }
     }
-}
 
-/// 拼接站点完整 URL;仅接受 http/https scheme(大小写不敏感),
-/// 防止解析出的坏链接拼出畸形 URL 或指向 file:// 等本地资源。
-pub fn site_url(path: &str) -> String {
-    let lower = path.trim().to_ascii_lowercase();
-    if lower.starts_with("https://") || lower.starts_with("http://") {
-        path.trim().to_string()
-    } else if lower.starts_with("//") {
-        format!("https:{}", path.trim())
-    } else {
-        format!("{}{path}", base_url())
-    }
-}
+    // ---- data source ----
 
-/// 搜索页 URL(关键词 URL 编码)
-pub fn search_url(query: &str) -> String {
-    let mut encoded = String::new();
-    for b in query.bytes() {
-        match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                encoded.push(b as char)
-            }
-            _ => encoded.push_str(&format!("%{b:02X}")),
-        }
+    /// Whether the backup data-source domain is currently in use.
+    pub fn use_backup_domain(&self) -> bool {
+        self.use_backup_domain.load(Ordering::Relaxed)
     }
-    format!("{}/Home/Search?searchstr={encoded}", base_url())
+
+    /// Sets whether to use the backup domain.
+    ///
+    /// The switch also resets image host probing and clears failed covers, so covers that
+    /// failed on the previous domain retry immediately instead of waiting out the cooldown.
+    pub fn set_backup_domain(&self, enabled: bool) {
+        self.use_backup_domain.store(enabled, Ordering::Relaxed);
+        self.image_use_alternate.store(false, Ordering::Relaxed);
+        self.clear_failed_images();
+    }
+
+    /// Clears failed image tasks and their retry cooldown so covers retry from scratch; the
+    /// version bump makes the UI re-attempt the placeholder downloads.
+    fn clear_failed_images(&self) {
+        self.images
+            .lock()
+            .unwrap()
+            .retain(|_, status| !matches!(status, ImgStatus::Error));
+        self.image_errors.lock().unwrap().clear();
+        self.image_version.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Root address of the currently selected data source.
+    pub fn base_url(&self) -> &'static str {
+        endpoints::base_url(self.use_backup_domain())
+    }
+
+    /// Joins a full site URL (see [`endpoints::site_url`]).
+    pub fn site_url(&self, path: &str) -> String {
+        endpoints::site_url(self.base_url(), path)
+    }
+
+    /// Search-page URL for the current data source.
+    pub fn search_url(&self, query: &str) -> String {
+        endpoints::search_url(self.base_url(), query)
+    }
+
+    /// Rewrites a URL on a known data-source host to the currently selected host.
+    pub fn normalize_url(&self, url: &str) -> String {
+        endpoints::rewrite_host(url, self.base_url())
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn site_url_join() {
-        assert_eq!(
-            site_url("/Home/Bangumi"),
-            "https://mikanani.me/Home/Bangumi"
-        );
-        assert_eq!(
-            site_url("https://other.com/x"),
-            "https://other.com/x",
-            "绝对地址原样返回"
-        );
-    }
-
-    #[test]
-    fn host_rewrite_normalizes_both_mirrors() {
-        // 主站 → 备用
-        assert_eq!(
-            rewrite_host("https://mikanani.me/images/a.jpg", BACKUP_BASE_URL),
-            "https://mikanime.tv/images/a.jpg"
-        );
-        // 备用 → 主站
-        assert_eq!(
-            rewrite_host("https://mikanime.tv/Home/Bangumi/3883", BASE_URL),
-            "https://mikanani.me/Home/Bangumi/3883"
-        );
-        // 未知主机 / 相对路径不改
-        assert_eq!(
-            rewrite_host("https://other.com/x", BASE_URL),
-            "https://other.com/x"
-        );
-        assert_eq!(rewrite_host("/images/a.jpg", BASE_URL), "/images/a.jpg");
-        // 同前缀的其它域名不被误伤
-        assert_eq!(
-            rewrite_host("https://mikanani.me.evil.com/x", BASE_URL),
-            "https://mikanani.me.evil.com/x"
-        );
-    }
-
-    #[test]
-    fn alternate_url_swaps_known_hosts() {
-        assert_eq!(
-            alternate_url("https://mikanani.me/images/Bangumi/a.jpg?width=400&height=560"),
-            Some("https://mikanime.tv/images/Bangumi/a.jpg?width=400&height=560".to_string())
-        );
-        assert_eq!(
-            alternate_url("https://mikanime.tv/images/Bangumi/a.jpg"),
-            Some("https://mikanani.me/images/Bangumi/a.jpg".to_string())
-        );
-        // 非已知主机 / 同前缀域名不误伤
-        assert_eq!(alternate_url("https://other.com/x"), None);
-        assert_eq!(alternate_url("https://mikanani.me.evil.com/x"), None);
-        assert_eq!(alternate_url("/images/a.jpg"), None);
-    }
+    use super::{ImgStatus, Network};
 
     #[test]
     fn image_claim_dedup() {
+        let network = Network::new();
         let url = "https://example.com/a.jpg";
-        assert!(claim_image(url), "首次认领成功");
-        assert!(!claim_image(url), "第二次认领被拒绝(去重)");
-        finish_image(url, true);
-        assert_eq!(image_status(url), ImgStatus::Loaded);
-        assert!(!claim_image(url), "已加载不再重复下载");
-    }
-
-    #[test]
-    fn backoff_blocks_then_resets() {
-        // 模拟一次失败:进入退避
-        with_state(|s| {
-            s.fail_streak = 1;
-            s.backoff.insert(
-                "https://example.com/page".into(),
-                Instant::now() + Duration::from_secs(60),
-            );
-        });
-        assert!(in_backoff("https://example.com/page"), "失败后应处于退避期");
-
-        // 用户主动重试:清除退避后立即放行
-        reset_backoff("https://example.com/page");
-        assert!(!in_backoff("https://example.com/page"), "重置后不再退避");
-        // 其他 URL 不受影响
-        assert!(!in_backoff("https://example.com/other"));
+        assert!(network.claim_image(url), "首次认领成功");
+        assert!(!network.claim_image(url), "第二次认领被拒绝(去重)");
+        network.finish_image(url, true);
+        assert_eq!(network.image_status(url), ImgStatus::Loaded);
+        assert!(!network.claim_image(url), "已加载不再重复下载");
     }
 }

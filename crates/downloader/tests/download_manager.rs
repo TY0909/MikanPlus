@@ -1,15 +1,17 @@
-//! DownloadManager 集成测试:添加任务 → 快照出现 → 取消 → 快照消失。
+//! DownloadManager integration test: add task → appears in snapshot → cancel → disappears from snapshot.
 //!
-//! 使用真实磁力(碧蓝之海 3 第 5 集,info_hash 来自 mikan_session 遗留文件),
-//! 不依赖网络连通性:只要任务进入快照(Initializing/Downloading/Error 均可)即通过。
+//! Uses a real magnet link (Grand Blue 3 episode 5, info_hash taken from a leftover mikan_session file)
+//! and does not depend on network connectivity: it passes as long as the task enters the snapshot,
+//! whatever its state (Initializing, Downloading, or Error).
 
 use std::time::Duration;
 
 use downloader::{DownloadCmd, DownloadManager};
 
-/// 碧蓝之海 3 - 05 的 info_hash(hex)
+/// info_hash (hex) of Grand Blue 3 - 05
 const INFO_HASH_HEX: &str = "c06e0fa66e76e5f30d10e4b00eaa2472b6d62a37";
 
+/// Converts a lowercase hex string into its raw bytes.
 fn hex_to_bytes(hex: &str) -> Vec<u8> {
     (0..hex.len())
         .step_by(2)
@@ -19,12 +21,12 @@ fn hex_to_bytes(hex: &str) -> Vec<u8> {
 
 #[test]
 fn add_and_cancel_task() {
-    // 隔离数据目录:避免与并行测试/真实数据共享 DHT 端口与任务状态
+    // Isolated data directory: avoids sharing the DHT port and task state with parallel tests or real data.
     let base = std::env::temp_dir().join(format!("mikan_dl_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let mgr = DownloadManager::start_with_base(base.clone());
 
-    // 构造磁力(带 tracker,避免依赖蜜柑磁力的失效 tracker)
+    // Build the magnet link (with trackers, to avoid relying on the dead trackers baked into Mikan magnet links).
     let id20 = librqbit::dht::Id20::from_bytes(&hex_to_bytes(INFO_HASH_HEX)).unwrap();
     let magnet = librqbit::Magnet::from_id20(
         id20,
@@ -33,7 +35,7 @@ fn add_and_cancel_task() {
     )
     .to_string();
 
-    // 添加到临时输出目录
+    // Add it to a temporary output directory.
     let out_dir = std::env::temp_dir().join("mikan_dl_test");
     let _ = mgr.send(DownloadCmd::Add {
         magnet,
@@ -41,7 +43,7 @@ fn add_and_cancel_task() {
         output_dir: out_dir,
     });
 
-    // 等待任务出现在快照中(最多 20 秒;metadata 获取/初始化均计入)
+    // Wait for the task to appear in the snapshot (up to 20 seconds; metadata fetching and initialization are included).
     let mut found = false;
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(500));
@@ -65,12 +67,12 @@ fn add_and_cancel_task() {
     }
     assert!(found, "添加任务后快照中应出现该任务");
 
-    // 取消任务
+    // Cancel the task.
     let _ = mgr.send(DownloadCmd::Cancel {
         id: INFO_HASH_HEX.to_string(),
     });
 
-    // 等待任务从快照消失
+    // Wait for the task to disappear from the snapshot.
     let mut removed = false;
     for _ in 0..20 {
         std::thread::sleep(Duration::from_millis(500));

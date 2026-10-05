@@ -1,36 +1,37 @@
-//! 全局动作定义。
+//! Global action definitions.
 //!
-//! 只保留 macOS 应用的标准菜单动作(关于/设置/隐藏/退出/关闭/最小化/缩放/全屏,
-//! 以及编辑菜单的系统动作)。命名空间为 `mikan`,由 `MikanPlus` 注册的全局监听器处理。
+//! Keeps only the standard macOS application menu actions (About/Settings/Hide/Quit/Close/
+//! Minimize/Zoom/Fullscreen, plus the Edit menu's system actions). The namespace is `mikan`,
+//! handled by the global listeners registered by `MikanPlus`.
 
 use gpui_kit::actions;
 
 actions!(
     mikan,
     [
-        // ---- 导航 / 弹层 ----
-        /// ⌘, 设置
+        // ---- Navigation / overlays ----
+        /// ⌘, Settings
         GoSettings,
-        /// Esc 关闭筛选窗口
+        /// Esc closes the filter modal
         CloseFilterModal,
-        // ---- 窗口 / 应用 ----
-        /// 关于
+        // ---- Window / application ----
+        /// About
         AboutMikan,
-        /// ⌘H 隐藏应用
+        /// ⌘H hide the app
         HideApp,
-        /// ⌥⌘H 隐藏其他
+        /// ⌥⌘H hide others
         HideOthers,
-        /// 全部显示(取消隐藏其他应用)
+        /// Show all (unhide other apps)
         ShowAllApps,
-        /// ⌘Q 退出
+        /// ⌘Q quit
         QuitApp,
-        /// ⌘W 关闭窗口
+        /// ⌘W close window
         CloseWindow,
-        /// ⌃⌘F 全屏
+        /// ⌃⌘F toggle fullscreen
         ToggleFullscreen,
-        /// ⌘M 最小化
+        /// ⌘M minimize
         MinimizeWindow,
-        /// 缩放窗口(绿色交通灯 / 菜单)
+        /// Zoom window (green traffic light / menu)
         ZoomWindow,
     ]
 );

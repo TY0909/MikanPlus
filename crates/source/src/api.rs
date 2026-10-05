@@ -1,100 +1,58 @@
-//! 蜜柑公开 JSON API(`/api/v1`)数据源。
+//! Mikan public JSON API (`/api/v1`) data source.
 //!
-//! 该 API **忽略一切 query 参数**（仅路径参数生效），且端点有限：
-//! - `GET /api/v1/bangumi`          当前季在播番剧列表（服务端已按星期排好）
-//! - `GET /api/v1/bangumi/{id}`     番剧信息 + 字幕组摘要（**不含剧集**）
+//! This API **ignores all query parameters** (only path parameters take effect), and its endpoints
+//! are limited:
+//! - `GET /api/v1/bangumi`          currently airing anime for the season (already ordered by weekday server-side)
+//! - `GET /api/v1/bangumi/{id}`     anime info + subtitle-group summary (**no episodes**)
 //!
-//! 字幕组剧集按需获取，见 [`crate::rss`]（详情页懒加载）。
+//! Subtitle-group episodes are fetched on demand, see [`crate::rss`] (lazy-loaded on the detail
+//! page).
 //!
-//! 这里只做 DTO 反序列化 + 映射/归一化，对外统一产出 `domain` 类型。
+//! This module handles fetching and mapping: the on-the-wire data shape is in [`dto`], and it
+//! uniformly produces `domain` types outward.
+
+mod dto;
 
 use domain::{
-    BangumiGroup, BangumiItem, BangumiKind, BangumiMeta, Season, SeasonName, SubtitleGroup, Weekday,
+    BangumiGroup, BangumiId, BangumiItem, BangumiKind, BangumiMeta, Season, SubgroupId,
+    SubtitleGroup, Weekday,
 };
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Deserializer};
 
-use crate::{SourceError, network, rss};
+use crate::{Network, SourceError, rss};
+use dto::{BangumiDto, Page, SubtitleGroupDto, season_from};
 
-/// 列表类响应的通用信封（只取 `items`，忽略分页字段）。
-#[derive(Deserialize)]
-struct Page<T> {
-    items: Vec<T>,
+/// Home-list API address (used to reset rate-limit backoff by URL).
+pub fn home_url(network: &Network) -> String {
+    format!("{}/api/v1/bangumi", network.base_url())
 }
 
-/// `/api/v1/bangumi` 与 `/api/v1/bangumi/{id}` 共用的 DTO（详情字段在列表响应中缺省）。
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct BangumiDto {
-    id: u32,
-    title: String,
-    #[serde(rename = "type", default, deserialize_with = "de_kind")]
-    kind: BangumiKind,
-    #[serde(default, deserialize_with = "de_weekday")]
-    day_of_week: Option<Weekday>,
-    #[serde(default)]
-    cover_url: Option<String>,
-    #[serde(default)]
-    start_date: Option<String>,
-    #[serde(default)]
-    updated_at: Option<String>,
-    #[serde(default)]
-    seasons: Vec<SeasonDto>,
-    #[serde(default)]
-    description: Option<String>,
-    #[serde(default)]
-    official_home_page: Option<String>,
-    #[serde(default)]
-    bangumi_url: Option<String>,
-    #[serde(default)]
-    subtitle_groups: Vec<SubtitleGroupDto>,
+/// Anime-detail API address (used to reset rate-limit backoff by URL).
+pub fn bangumi_url(network: &Network, id: BangumiId) -> String {
+    format!("{}/api/v1/bangumi/{}", network.base_url(), id.get())
 }
 
-#[derive(Deserialize)]
-struct SeasonDto {
-    year: i32,
-    season: String,
+/// Fetches the home list (currently airing this season), grouped by weekday / movie.
+pub fn fetch_home(network: &Network) -> Result<Vec<BangumiGroup>, SourceError> {
+    let page: Page<BangumiDto> = parse(&network.fetch_html(&home_url(network))?)?;
+    Ok(group_by_weekday(network, page.items))
 }
 
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct SubtitleGroupDto {
-    id: u32,
-    name: String,
-    #[serde(default)]
-    episode_count: u32,
-    #[serde(default)]
-    latest_published_at: Option<String>,
+/// Fetches anime details (info + subtitle groups; episodes are empty and loaded on demand by
+/// [`crate::rss::fetch_subgroup_episodes`]).
+pub fn fetch_bangumi(network: &Network, id: BangumiId) -> Result<BangumiItem, SourceError> {
+    let dto: BangumiDto = parse(&network.fetch_html(&bangumi_url(network, id))?)?;
+    Ok(to_bangumi_item(network, dto))
 }
 
-/// 首页列表 API 地址（供限速退避按 URL 复位）。
-pub fn home_url() -> String {
-    format!("{}/api/v1/bangumi", network::base_url())
-}
-
-/// 番剧详情 API 地址（供限速退避按 URL 复位）。
-pub fn bangumi_url(id: u32) -> String {
-    format!("{}/api/v1/bangumi/{id}", network::base_url())
-}
-
-/// 拉取首页列表（当前季在播），按星期/剧场版分组。
-pub fn fetch_home() -> Result<Vec<BangumiGroup>, SourceError> {
-    let page: Page<BangumiDto> = parse(&network::fetch_html(&home_url())?)?;
-    Ok(group_by_weekday(page.items))
-}
-
-/// 拉取番剧详情（信息 + 字幕组；剧集为空，由 [`crate::rss::fetch_subgroup_episodes`] 按需加载）。
-pub fn fetch_bangumi(id: u32) -> Result<BangumiItem, SourceError> {
-    let dto: BangumiDto = parse(&network::fetch_html(&bangumi_url(id))?)?;
-    Ok(to_bangumi_item(dto))
-}
-
+/// Parses JSON, mapping any deserialization error to [`SourceError::Decode`].
 fn parse<T: DeserializeOwned>(json: &str) -> Result<T, SourceError> {
     serde_json::from_str(json).map_err(|_| SourceError::Decode)
 }
 
-/// 按星期分组；`剧场版` 单独成一组（与现有首页 UI 的 `movie` key 对齐）。
-fn group_by_weekday(items: Vec<BangumiDto>) -> Vec<BangumiGroup> {
+/// Groups by weekday; movies (`剧场版`) form a separate group (aligned with the existing home UI's
+/// `movie` key).
+fn group_by_weekday(network: &Network, items: Vec<BangumiDto>) -> Vec<BangumiGroup> {
     const ORDER: [Weekday; 7] = [
         Weekday::Mon,
         Weekday::Tue,
@@ -116,7 +74,7 @@ fn group_by_weekday(items: Vec<BangumiDto>) -> Vec<BangumiGroup> {
     for dto in items {
         let weekday = dto.day_of_week;
         let is_movie = dto.kind == BangumiKind::Movie;
-        let item = to_bangumi_item(dto);
+        let item = to_bangumi_item(network, dto);
         if is_movie {
             movies.push(item);
         } else if let Some(day) = weekday
@@ -136,9 +94,10 @@ fn group_by_weekday(items: Vec<BangumiDto>) -> Vec<BangumiGroup> {
     groups
 }
 
-fn to_bangumi_item(dto: BangumiDto) -> BangumiItem {
-    let id = dto.id;
-    let cover_url = dto.cover_url.as_deref().map(network::site_url);
+/// Maps a wire DTO into the domain [`BangumiItem`].
+fn to_bangumi_item(network: &Network, dto: BangumiDto) -> BangumiItem {
+    let id = BangumiId::from(dto.id);
+    let cover_url = dto.cover_url.as_deref().map(|u| network.site_url(u));
     let meta = BangumiMeta {
         broadcast_day: dto.day_of_week.map(|day| day.label().to_string()),
         broadcast_start: dto.start_date,
@@ -150,13 +109,13 @@ fn to_bangumi_item(dto: BangumiDto) -> BangumiItem {
     let subtitle_groups = dto
         .subtitle_groups
         .into_iter()
-        .map(|group| to_subtitle_group(id, group))
+        .map(|group| to_subtitle_group(network, id, group))
         .collect();
     BangumiItem {
         name: dto.title,
-        bangumi_id: Some(id),
+        bangumi_id: id,
         cover_url,
-        detail_url: Some(format!("{}/Home/Bangumi/{id}", network::base_url())),
+        detail_url: Some(format!("{}/Home/Bangumi/{}", network.base_url(), id.get())),
         meta: Some(meta),
         kind: dto.kind,
         seasons: dto
@@ -175,63 +134,27 @@ fn to_bangumi_item(dto: BangumiDto) -> BangumiItem {
     }
 }
 
-fn to_subtitle_group(bangumi_id: u32, dto: SubtitleGroupDto) -> SubtitleGroup {
+/// Maps a wire subtitle-group DTO into the domain [`SubtitleGroup`] (with no episodes attached).
+fn to_subtitle_group(
+    network: &Network,
+    bangumi_id: BangumiId,
+    dto: SubtitleGroupDto,
+) -> SubtitleGroup {
+    let subgroup_id = SubgroupId::from(dto.id);
     SubtitleGroup {
         name: dto.name,
-        subgroup_id: Some(dto.id),
-        subscription_url: Some(rss::subgroup_rss_url(bangumi_id, dto.id)),
+        subgroup_id,
+        subscription_url: Some(rss::subgroup_rss_url(network, bangumi_id, subgroup_id)),
         episodes: Vec::new(),
         episode_count: dto.episode_count,
         latest_published_at: dto.latest_published_at,
     }
 }
 
-fn kind_from(raw: &str) -> Option<BangumiKind> {
-    match raw {
-        "TV" => Some(BangumiKind::Tv),
-        "WEB" => Some(BangumiKind::Web),
-        "OVA" => Some(BangumiKind::Ova),
-        "剧场版" => Some(BangumiKind::Movie),
-        _ => None,
-    }
-}
-
-fn weekday_from(raw: &str) -> Option<Weekday> {
-    match raw {
-        "星期一" => Some(Weekday::Mon),
-        "星期二" => Some(Weekday::Tue),
-        "星期三" => Some(Weekday::Wed),
-        "星期四" => Some(Weekday::Thu),
-        "星期五" => Some(Weekday::Fri),
-        "星期六" => Some(Weekday::Sat),
-        "星期日" => Some(Weekday::Sun),
-        _ => None,
-    }
-}
-
-fn season_from(raw: &str) -> Option<SeasonName> {
-    match raw {
-        "春" => Some(SeasonName::Spring),
-        "夏" => Some(SeasonName::Summer),
-        "秋" => Some(SeasonName::Autumn),
-        "冬" => Some(SeasonName::Winter),
-        _ => None,
-    }
-}
-
-fn de_kind<'de, D: Deserializer<'de>>(deserializer: D) -> Result<BangumiKind, D::Error> {
-    let raw = Option::<String>::deserialize(deserializer)?;
-    Ok(raw.as_deref().and_then(kind_from).unwrap_or_default())
-}
-
-fn de_weekday<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Option<Weekday>, D::Error> {
-    let raw = Option::<String>::deserialize(deserializer)?;
-    Ok(raw.as_deref().and_then(weekday_from))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use domain::SeasonName;
 
     const LIST: &str = r#"{"items":[
         {"id":4111,"title":"A","type":"TV","dayOfWeek":"星期日","coverUrl":"/images/a.jpg","startDate":"2026-10-04T00:00:00","updatedAt":null,"seasons":[{"year":2026,"season":"秋"}],"links":{"site":"x","rss":"y"}},
@@ -246,7 +169,8 @@ mod tests {
 
     #[test]
     fn groups_home_by_weekday_and_movie() {
-        let groups = group_by_weekday(list_items(LIST));
+        let network = Network::new();
+        let groups = group_by_weekday(&network, list_items(LIST));
         let sunday = groups.iter().find(|g| g.day == "sunday").unwrap();
         assert_eq!(sunday.items.len(), 1);
         assert_eq!(sunday.title, "星期日");
@@ -269,8 +193,9 @@ mod tests {
 
     #[test]
     fn detail_maps_meta_and_groups_without_episodes() {
-        let item = to_bangumi_item(parse::<BangumiDto>(DETAIL).unwrap());
-        assert_eq!(item.bangumi_id, Some(3560));
+        let network = Network::new();
+        let item = to_bangumi_item(&network, parse::<BangumiDto>(DETAIL).unwrap());
+        assert_eq!(item.bangumi_id, BangumiId::from(3560));
         assert_eq!(item.kind, BangumiKind::Tv);
         let meta = item.meta.as_ref().unwrap();
         assert_eq!(meta.summary.as_deref(), Some("简介"));
@@ -284,7 +209,7 @@ mod tests {
 
         assert_eq!(item.subtitle_groups.len(), 1);
         let group = &item.subtitle_groups[0];
-        assert_eq!(group.subgroup_id, Some(370));
+        assert_eq!(group.subgroup_id, SubgroupId::from(370));
         assert_eq!(group.name, "LoliHouse");
         assert_eq!(group.episode_count, 13);
         assert_eq!(
@@ -304,8 +229,8 @@ mod tests {
     #[test]
     fn unknown_kind_and_weekday_are_tolerated() {
         let json = r#"{"items":[{"id":1,"title":"X","type":"UNKNOWN","dayOfWeek":"星期八"}]}"#;
-        // 未知类型 → Other；未知星期 → 丢弃；不应 panic
-        assert!(group_by_weekday(list_items(json)).is_empty());
+        // Unknown kind → Other; unknown weekday → discarded; must not panic
+        assert!(group_by_weekday(&Network::new(), list_items(json)).is_empty());
     }
 
     #[test]
