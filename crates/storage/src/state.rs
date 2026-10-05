@@ -1,219 +1,169 @@
-use domain::Subscription;
+//! The persisted application state (`state.json`) and its owner.
+//!
+//! [`State`] owns the whole document in memory (loaded once), exposes strongly typed accessors
+//! over it, and persists on every mutation. The key layout is a user-visible persistence
+//! contract, so any change needs a matching migration (see `crate::migrate`).
+//!
+//! The application owns the single [`State`] instance (see `MikanPlus`) and passes it to the
+//! components that need it, rather than reaching for a global.
 
-/// 持久化文件路径(标准数据目录,并迁移旧版相对路径文件)
-fn state_path() -> std::path::PathBuf {
-    let dir = crate::paths::app_data_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let new = dir.join("state.json");
-    // 迁移旧版(运行目录下的 mikan_state.json):copy 到 .tmp 后 rename,保证原子性
-    let old = std::path::PathBuf::from("mikan_state.json");
-    if old.exists() && !new.exists() {
-        let tmp = new.with_extension("json.tmp");
-        if std::fs::copy(&old, &tmp).is_ok() {
-            let _ = std::fs::rename(&tmp, &new);
+mod store;
+
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+
+use serde_json::{Map, Value};
+
+use domain::{BangumiId, SubgroupId, SubgroupRef, Subscription};
+
+use store::{persist, read_state, state_path};
+
+/// The owner of the persisted application state (`state.json`).
+pub struct State {
+    doc: RefCell<Map<String, Value>>,
+    /// Whether the document loaded successfully. When the file was damaged at load it is backed up
+    /// and writes are refused, so a settings change never overwrites (damaged) user state.
+    writable: bool,
+}
+
+impl State {
+    /// Loads the persisted state from disk (once).
+    pub fn load() -> State {
+        match read_state(&state_path()) {
+            Some(Value::Object(doc)) => State {
+                doc: RefCell::new(doc),
+                writable: true,
+            },
+            _ => State {
+                doc: RefCell::new(Map::new()),
+                writable: false,
+            },
         }
     }
-    new
-}
 
-/// 全文件读-改-写的互斥锁(防止并发写者交错丢字段)
-static STATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-/// 原子写入:先写 `state.json.tmp` 再 rename 替换。
-/// 进程中途崩溃不会留下半截文件。
-fn atomic_write(path: &std::path::Path, text: &str) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
-}
-
-/// 读取状态文件。损坏或根节点类型错误时备份并拒绝自动写回，
-/// 避免一次设置修改覆盖全部用户状态。
-fn read_state(path: &std::path::Path) -> Option<serde_json::Value> {
-    let text = match std::fs::read_to_string(path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Some(serde_json::json!({}));
-        }
-        Err(error) => {
-            eprintln!("读取状态文件失败: {error}");
-            return None;
-        }
-    };
-    if text.trim().is_empty() {
-        return Some(serde_json::json!({}));
+    /// Reads a raw field (the document is already parsed in memory).
+    fn get(&self, key: &str) -> Option<Value> {
+        self.doc.borrow().get(key).cloned()
     }
 
-    match serde_json::from_str::<serde_json::Value>(&text) {
-        Ok(state @ serde_json::Value::Object(_)) => Some(state),
-        Ok(_) => {
-            let bak = path.with_extension("json.bak");
-            let _ = std::fs::write(&bak, &text);
-            eprintln!("state.json 根节点不是对象,已备份到 {bak:?}");
-            None
+    /// Writes a raw field and persists the whole document.
+    fn set(&self, key: &str, value: Value) {
+        if !self.writable {
+            eprintln!("状态文件损坏,已拒绝写入以保护原文件");
+            return;
         }
-        Err(error) => {
-            let bak = path.with_extension("json.bak");
-            let _ = std::fs::write(&bak, &text);
-            eprintln!("state.json 解析失败,已备份到 {bak:?}: {error}");
-            None
-        }
+        let mut doc = self.doc.borrow_mut();
+        doc.insert(key.to_string(), value);
+        persist(&doc);
+    }
+
+    /// The subscription records.
+    pub fn subscriptions(&self) -> Vec<Subscription> {
+        self.get("subscriptions")
+            .and_then(|value| serde_json::from_value(value).ok())
+            .unwrap_or_default()
+    }
+
+    /// Saves the subscription records.
+    pub fn set_subscriptions(&self, subscriptions: &[Subscription]) {
+        self.set(
+            "subscriptions",
+            serde_json::to_value(subscriptions).unwrap_or_default(),
+        );
+    }
+
+    /// The saved theme mode (light / dark / none).
+    pub fn theme_mode(&self) -> Option<String> {
+        self.get("theme")?.as_str().map(str::to_string)
+    }
+
+    /// Saves the theme mode.
+    pub fn set_theme_mode(&self, mode: &str) {
+        self.set("theme", Value::String(mode.into()));
+    }
+
+    /// The download directory (defaults to `~/Videos`, user-modifiable).
+    pub fn download_dir(&self) -> PathBuf {
+        self.get("download_dir")
+            .and_then(|value| value.as_str().map(PathBuf::from))
+            .filter(|path| !path.as_os_str().is_empty())
+            .unwrap_or_else(crate::paths::video_dir)
+    }
+
+    /// Saves the download directory.
+    pub fn set_download_dir(&self, dir: &Path) {
+        self.set(
+            "download_dir",
+            Value::String(dir.to_string_lossy().into_owned()),
+        );
+    }
+
+    /// The "enable backup domain" switch (off by default, using the primary site mikanani.me).
+    pub fn use_backup_domain(&self) -> bool {
+        self.get("use_backup_domain")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Saves the "enable backup domain" switch.
+    pub fn set_use_backup_domain(&self, enabled: bool) {
+        self.set("use_backup_domain", Value::Bool(enabled));
+    }
+
+    /// Whether unsubscribing defaults to removing the download directory and files (off by
+    /// default, preserving the user's downloads).
+    pub fn remove_downloads_on_unsubscribe(&self) -> bool {
+        self.get("remove_downloads_on_unsubscribe")
+            .and_then(|value| value.as_bool())
+            .unwrap_or(false)
+    }
+
+    /// Saves the default choice of "remove download directory and files" in the unsubscribe
+    /// confirmation dialog.
+    pub fn set_remove_downloads_on_unsubscribe(&self, enabled: bool) {
+        self.set("remove_downloads_on_unsubscribe", Value::Bool(enabled));
+    }
+
+    /// Episode-filter keywords on the subscription detail page (JSON keys use
+    /// "bangumi id:subtitle group id").
+    pub fn subgroup_keywords(&self) -> HashMap<SubgroupRef, String> {
+        parse_subgroup_keywords(self.get("subgroup_keywords"))
+    }
+
+    /// Saves the episode-filter keywords.
+    pub fn set_subgroup_keywords(&self, keywords: &HashMap<SubgroupRef, String>) {
+        let map: Map<String, Value> = keywords
+            .iter()
+            .map(|(key, keyword)| {
+                (
+                    format!("{}:{}", key.bangumi.get(), key.subgroup.get()),
+                    Value::String(keyword.clone()),
+                )
+            })
+            .collect();
+        self.set("subgroup_keywords", Value::Object(map));
     }
 }
 
-/// 读写合并的状态文件(原子写 + 互斥)
-fn write_state(update: impl FnOnce(&mut serde_json::Value)) {
-    let _guard = STATE_LOCK.lock().unwrap();
-    let path = state_path();
-    let Some(mut state) = read_state(&path) else {
-        return;
-    };
-    update(&mut state);
-    if let Ok(text) = serde_json::to_string_pretty(&state)
-        && let Err(e) = atomic_write(&path, &text)
-    {
-        eprintln!("写入状态文件失败: {e}");
-    }
-}
-
-/// 读取状态文件(带互斥,损坏时备份)
-fn read_json_field(key: &str) -> Option<serde_json::Value> {
-    let _guard = STATE_LOCK.lock().unwrap();
-    read_state(&state_path())?.get(key).cloned()
-}
-
-/// 保存订阅记录
-pub fn save_subscriptions(subscriptions: &[Subscription]) {
-    write_state(|state| {
-        state["subscriptions"] = serde_json::to_value(subscriptions).unwrap_or_default();
-    });
-}
-
-/// 加载订阅记录
-pub fn load_subscriptions() -> Vec<Subscription> {
-    read_json_field("subscriptions")
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default()
-}
-
-/// 保存主题模式
-pub fn save_theme_mode(mode: &str) {
-    write_state(|state| {
-        state["theme"] = serde_json::Value::String(mode.into());
-    });
-}
-
-/// 读取已保存的主题模式(light / dark / 无)
-pub fn load_theme_mode() -> Option<String> {
-    read_json_field("theme")?.as_str().map(|s| s.to_string())
-}
-
-/// 写入任意 JSON 字段(合并到状态文件)
-pub fn save_json_field(key: &str, value: &serde_json::Value) {
-    write_state(|state| {
-        state[key] = value.clone();
-    });
-}
-
-/// 读取任意 JSON 字段
-pub fn load_json_field(key: &str) -> Option<serde_json::Value> {
-    read_json_field(key)
-}
-
-/// 下载目录的内存缓存(读取时惰性填充,保存时失效)。
-/// 避免 render 每帧读盘解析 state.json。
-static DOWNLOAD_DIR_CACHE: std::sync::OnceLock<std::sync::Mutex<Option<std::path::PathBuf>>> =
-    std::sync::OnceLock::new();
-
-fn download_dir_cache() -> &'static std::sync::Mutex<Option<std::path::PathBuf>> {
-    DOWNLOAD_DIR_CACHE.get_or_init(|| std::sync::Mutex::new(None))
-}
-
-/// 下载目录(默认 `~/Videos`,用户可修改)
-pub fn load_download_dir() -> std::path::PathBuf {
-    let mut cache = download_dir_cache().lock().unwrap();
-    if let Some(dir) = cache.as_ref() {
-        return dir.clone();
-    }
-    let dir = load_json_field("download_dir")
-        .and_then(|v| v.as_str().map(std::path::PathBuf::from))
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(crate::paths::video_dir);
-    *cache = Some(dir.clone());
-    dir
-}
-
-pub fn save_download_dir(dir: &std::path::Path) {
-    save_json_field(
-        "download_dir",
-        &serde_json::Value::String(dir.to_string_lossy().into_owned()),
-    );
-    *download_dir_cache().lock().unwrap() = Some(dir.to_path_buf());
-}
-
-/// 保存「启用备用域名」开关
-pub fn save_use_backup_domain(enabled: bool) {
-    save_json_field("use_backup_domain", &serde_json::Value::Bool(enabled));
-}
-
-/// 读取「启用备用域名」开关(默认关闭,使用主站 mikanani.me)
-pub fn load_use_backup_domain() -> bool {
-    load_json_field("use_backup_domain")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
-/// 保存退订确认窗口中「移除下载目录和文件」的默认选项。
-pub fn save_remove_downloads_on_unsubscribe(enabled: bool) {
-    save_json_field(
-        "remove_downloads_on_unsubscribe",
-        &serde_json::Value::Bool(enabled),
-    );
-}
-
-/// 读取退订时是否默认移除下载目录和文件(默认关闭,保留用户下载内容)。
-pub fn load_remove_downloads_on_unsubscribe() -> bool {
-    load_json_field("remove_downloads_on_unsubscribe")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false)
-}
-
-/// 订阅详情页的剧集筛选关键词(JSON key 使用 "番剧id:字幕组id")
-pub fn save_subgroup_keywords(keywords: &std::collections::HashMap<(u32, u32), String>) {
-    let map: serde_json::Map<String, serde_json::Value> = keywords
-        .iter()
-        .map(|((bangumi_id, subgroup_id), keyword)| {
-            (
-                format!("{bangumi_id}:{subgroup_id}"),
-                serde_json::Value::String(keyword.clone()),
-            )
-        })
-        .collect();
-    save_json_field("subgroup_keywords", &serde_json::Value::Object(map));
-}
-
-/// 读取剧集筛选关键词
-pub fn load_subgroup_keywords() -> std::collections::HashMap<(u32, u32), String> {
-    parse_subgroup_keywords(load_json_field("subgroup_keywords"))
-}
-
-/// 解析筛选关键词 JSON(独立纯函数,便于测试)
-fn parse_subgroup_keywords(
-    value: Option<serde_json::Value>,
-) -> std::collections::HashMap<(u32, u32), String> {
+/// Parses the filter-keyword JSON (a standalone pure function, easy to test).
+fn parse_subgroup_keywords(value: Option<Value>) -> HashMap<SubgroupRef, String> {
     value
         .and_then(|v| v.as_object().cloned())
         .map(|obj| {
             obj.into_iter()
                 .filter_map(|(key, value)| {
                     let (bangumi, subgroup) = key.split_once(':')?;
-                    let bangumi_id: u32 = bangumi.parse().ok()?;
-                    let subgroup_id: u32 = subgroup.parse().ok()?;
+                    let bangumi: u32 = bangumi.parse().ok()?;
+                    let subgroup: u32 = subgroup.parse().ok()?;
                     let keyword = value.as_str()?;
                     if keyword.is_empty() {
                         return None;
                     }
-                    Some(((bangumi_id, subgroup_id), keyword.to_string()))
+                    Some((
+                        SubgroupRef::new(BangumiId::from(bangumi), SubgroupId::from(subgroup)),
+                        keyword.to_string(),
+                    ))
                 })
                 .collect()
         })
@@ -233,45 +183,18 @@ mod tests {
         });
         let map = parse_subgroup_keywords(Some(value));
         assert_eq!(map.len(), 2);
-        assert_eq!(map.get(&(101, 5)).map(String::as_str), Some("简日"));
-        assert_eq!(map.get(&(202, 7)).map(String::as_str), Some("1080"));
-        // 空关键词被丢弃
-        assert!(!map.contains_key(&(303, 9)));
-    }
-
-    #[test]
-    fn damaged_state_is_backed_up_and_rejected() {
-        let path =
-            std::env::temp_dir().join(format!("mikan-state-damaged-{}.json", std::process::id()));
-        let backup = path.with_extension("json.bak");
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(&backup);
-        std::fs::write(&path, "{not-json").expect("write damaged state fixture");
-
-        assert!(read_state(&path).is_none());
         assert_eq!(
-            std::fs::read_to_string(&backup).expect("damaged state backup"),
-            "{not-json"
+            map.get(&SubgroupRef::new(BangumiId::from(101), SubgroupId::from(5)))
+                .map(String::as_str),
+            Some("简日")
         );
-
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(backup);
-    }
-
-    #[test]
-    fn non_object_state_is_rejected() {
-        let path =
-            std::env::temp_dir().join(format!("mikan-state-array-{}.json", std::process::id()));
-        let backup = path.with_extension("json.bak");
-        let _ = std::fs::remove_file(&path);
-        let _ = std::fs::remove_file(&backup);
-        std::fs::write(&path, "[]").expect("write non-object state fixture");
-
-        assert!(read_state(&path).is_none());
-        assert!(backup.exists());
-
-        let _ = std::fs::remove_file(path);
-        let _ = std::fs::remove_file(backup);
+        assert_eq!(
+            map.get(&SubgroupRef::new(BangumiId::from(202), SubgroupId::from(7)))
+                .map(String::as_str),
+            Some("1080")
+        );
+        // Empty keywords are dropped
+        assert!(!map.contains_key(&SubgroupRef::new(BangumiId::from(303), SubgroupId::from(9))));
     }
 
     #[test]

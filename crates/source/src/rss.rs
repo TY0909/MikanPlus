@@ -1,19 +1,23 @@
-//! 蜜柑 RSS 数据源(结构化 XML)。
+//! Mikan RSS data source (structured XML).
 //!
-//! 用于「某字幕组的全部剧集」(详情页懒加载):`GET /RSS/Bangumi?bangumiId=&subgroupid=`。
-//! - 每条 `<item>` 的 `<link>` 末段是 info hash,`<enclosure url>` 是 `.torrent` 直链
-//! - 磁力只带 info hash;公共 tracker 由下载层在添加任务时统一合并
+//! Used for "all episodes of one subgroup" (detail-page lazy loading):
+//! `GET /RSS/Bangumi?bangumiId=&subgroupid=`.
+//! - Each `<item>`'s `<link>` last segment is the info hash; `<enclosure url>` is
+//!   the direct `.torrent` link
+//! - The magnet carries only the info hash; public trackers are merged uniformly
+//!   by the download layer when the task is added
 //!
-//! 注:`?bangumiId=`(不带 subgroupid)会返回整部番剧全集,但**不含字幕组归属**,
-//! 故不用于详情的分组展示。
+//! Note: `?bangumiId=` (without subgroupid) returns the whole bangumi's episodes
+//! but **omits the subgroup attribution**, so it is not used for the grouped
+//! detail display.
 
-use domain::Episode;
+use domain::{BangumiId, Episode, SubgroupId};
 use roxmltree::{Document, Node};
 
+use crate::Network;
 use crate::SourceError;
-use crate::network;
 
-/// 解析 RSS 文本 → 剧集列表(保持条目顺序)。
+/// Parse RSS text → episode list (preserving item order).
 pub fn parse_rss_episodes(xml: &str) -> Vec<Episode> {
     let Ok(doc) = Document::parse(xml) else {
         return Vec::new();
@@ -24,20 +28,27 @@ pub fn parse_rss_episodes(xml: &str) -> Vec<Episode> {
         .collect()
 }
 
-/// 拉取某字幕组的剧集列表(详情页懒加载调用)。
+/// Fetch one subgroup's episode list (called by detail-page lazy loading).
 pub fn fetch_subgroup_episodes(
-    bangumi_id: u32,
-    subgroup_id: u32,
+    network: &Network,
+    bangumi_id: BangumiId,
+    subgroup_id: SubgroupId,
 ) -> Result<Vec<Episode>, SourceError> {
-    let xml = network::fetch_html(&subgroup_rss_url(bangumi_id, subgroup_id))?;
+    let xml = network.fetch_html(&subgroup_rss_url(network, bangumi_id, subgroup_id))?;
     Ok(parse_rss_episodes(&xml))
 }
 
-/// 某字幕组的 RSS 地址(与详情页 `a.mikan-rss` 的 href 一致)。
-pub fn subgroup_rss_url(bangumi_id: u32, subgroup_id: u32) -> String {
+/// RSS URL for one subgroup (matches the `href` of `a.mikan-rss` on the detail page).
+pub fn subgroup_rss_url(
+    network: &Network,
+    bangumi_id: BangumiId,
+    subgroup_id: SubgroupId,
+) -> String {
     format!(
-        "{}/RSS/Bangumi?bangumiId={bangumi_id}&subgroupid={subgroup_id}",
-        network::base_url()
+        "{}/RSS/Bangumi?bangumiId={}&subgroupid={}",
+        network.base_url(),
+        bangumi_id.get(),
+        subgroup_id.get()
     )
 }
 
@@ -61,7 +72,8 @@ fn episode_from_item(item: Node) -> Option<Episode> {
     })
 }
 
-/// 深度优先取第一个匹配元素的文本(`<pubDate>` 嵌在命名空间元素 `<torrent>` 内)。
+/// Depth-first lookup of the first matching element's text (`<pubDate>` is nested
+/// inside the namespaced `<torrent>` element).
 fn first_text(node: Node, name: &str) -> Option<String> {
     node.descendants()
         .find(|child| child.is_element() && child.has_tag_name(name))
@@ -70,7 +82,8 @@ fn first_text(node: Node, name: &str) -> Option<String> {
         .filter(|text| !text.is_empty())
 }
 
-/// info hash:优先取 `<link>`(剧集页)末段,回退到 `<enclosure>` 的 `.torrent` 文件名。
+/// info hash: prefer the last segment of `<link>` (episode page), falling back to
+/// the `.torrent` filename from `<enclosure>`.
 fn item_hash(item: Node) -> Option<String> {
     if let Some(hash) = first_text(item, "link")
         .and_then(|link| last_segment(&link).map(str::to_string))
@@ -95,7 +108,8 @@ fn is_info_hash(candidate: &str) -> Option<String> {
     (candidate.len() == 40 && candidate.bytes().all(|b| b.is_ascii_hexdigit())).then_some(candidate)
 }
 
-/// 从描述末尾的 `[...]` 取大小(蜜柑展示格式,如 `674.7 MB`)。
+/// Extract the size from a trailing `[...]` in the description (Mikan's display
+/// format, e.g. `674.7 MB`).
 fn trailing_size(description: &str) -> Option<String> {
     let inner = description.trim_end().strip_suffix(']')?;
     let start = inner.rfind('[')?;
@@ -103,7 +117,7 @@ fn trailing_size(description: &str) -> Option<String> {
     (!size.is_empty()).then(|| size.to_string())
 }
 
-/// ISO `2025-11-13T19:15:26.336282` → 蜜柑展示格式 `2025/11/13 19:15`。
+/// ISO `2025-11-13T19:15:26.336282` → Mikan display format `2025/11/13 19:15`.
 fn format_pub_date(iso: &str) -> Option<String> {
     let (date, time) = iso.split_once('T')?;
     let date = date.replace('-', "/");
@@ -160,7 +174,12 @@ mod tests {
     #[test]
     fn subgroup_rss_url_matches_site() {
         assert!(
-            subgroup_rss_url(3560, 370).ends_with("/RSS/Bangumi?bangumiId=3560&subgroupid=370")
+            subgroup_rss_url(
+                &crate::Network::new(),
+                BangumiId::from(3560),
+                SubgroupId::from(370)
+            )
+            .ends_with("/RSS/Bangumi?bangumiId=3560&subgroupid=370")
         );
     }
 }

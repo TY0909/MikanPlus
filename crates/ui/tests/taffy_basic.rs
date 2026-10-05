@@ -1,8 +1,9 @@
-//! 验证 taffy 0.9.0 的 flex-grow / stretch 行为(排除 GPUI 集成因素的底层实验)。
+//! Verifies taffy 0.9.0 flex-grow / stretch behavior in isolation, excluding GPUI integration factors.
 
 use taffy::prelude::*;
 use taffy::{FlexDirection, Style, TaffyTree};
 
+/// A flex_grow child with a length(0) basis fills the remaining column height.
 #[test]
 fn taffy_flex_column_grow() {
     let mut taffy: TaffyTree<()> = TaffyTree::new();
@@ -62,9 +63,10 @@ fn taffy_flex_column_grow() {
     );
 }
 
+/// A flex_grow child with a percent(0) basis also fills the remaining column height.
 #[test]
 fn taffy_flex_grow_with_percent_basis() {
-    // GPUI 的 flex_1 使用 flex-basis: percent(0),验证 taffy 中是否正常
+    // GPUI's flex_1 uses flex-basis: percent(0); checks whether taffy handles it correctly.
     let mut taffy: TaffyTree<()> = TaffyTree::new();
 
     let head = taffy
@@ -121,6 +123,7 @@ fn taffy_flex_grow_with_percent_basis() {
     );
 }
 
+/// A row child with an automatic height stretches to the container's cross-axis height.
 #[test]
 fn taffy_flex_row_stretch() {
     let mut taffy: TaffyTree<()> = TaffyTree::new();

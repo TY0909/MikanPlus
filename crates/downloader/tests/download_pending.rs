@@ -1,16 +1,16 @@
-//! 回归测试:metadata 获取耗时期间(任务尚未注册到 librqbit),
-//! 快照循环必须继续运行并展示「获取信息…」状态(不阻塞)。
+//! Regression test: while metadata fetching is slow (the task is not yet registered with librqbit),
+//! the snapshot loop must keep running and show the "fetching info…" state without blocking.
 
 use std::time::Duration;
 
 use downloader::{DownloadCmd, DownloadManager, TaskState};
 
-/// 随机 info_hash(不存在对应资源,metadata 将永远获取不到)
+/// Random info_hash (no matching resource exists, so metadata will never be fetched)
 const RANDOM_HASH: &str = "0000000000000000000000000000000000000001";
 
 #[test]
 fn pending_state_shows_during_slow_metadata() {
-    // 隔离数据目录:避免与并行测试/真实数据共享 DHT 端口与任务状态
+    // Isolated data directory: avoids sharing the DHT port and task state with parallel tests or real data.
     let base = std::env::temp_dir().join(format!("mikan_pending_test_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&base);
     let mgr = DownloadManager::start_with_base(base.clone());
@@ -18,7 +18,7 @@ fn pending_state_shows_during_slow_metadata() {
     let id20 = librqbit::dht::Id20::from_bytes(&[0u8; 20]).unwrap();
     let mut magnet = librqbit::Magnet::from_id20(id20, Vec::new(), None);
     magnet.name = Some("[测试] 无源任务".into());
-    // 覆盖 info_hash 为固定测试值,便于断言
+    // Override info_hash with a fixed test value so the assertion is deterministic.
     let magnet = magnet
         .to_string()
         .replace("0000000000000000000000000000000000000000", RANDOM_HASH);
@@ -29,12 +29,12 @@ fn pending_state_shows_during_slow_metadata() {
         output_dir: std::env::temp_dir().join("mikan_pending_test"),
     });
 
-    // metadata 永远拿不到(add_torrent 会挂到 60s 超时),
-    // 但快照循环不受影响:1 秒内应出现 Initializing 状态
+    // Metadata can never be fetched (add_torrent hangs until its 60s timeout),
+    // but the snapshot loop is unaffected: the Initializing state should appear within 1 second.
     let mut appeared = false;
     for i in 0..10 {
         std::thread::sleep(Duration::from_millis(500));
-        let events = downloader::take_events();
+        let events = mgr.take_events();
         if !events.is_empty() {
             println!("事件: {:?}", events);
         }
@@ -57,7 +57,7 @@ fn pending_state_shows_during_slow_metadata() {
     }
     assert!(appeared, "metadata 获取期间快照中应出现「获取信息…」状态");
 
-    // 取消:状态应消失
+    // Cancel: the state should disappear.
     let _ = mgr.send(DownloadCmd::Cancel {
         id: RANDOM_HASH.to_string(),
     });

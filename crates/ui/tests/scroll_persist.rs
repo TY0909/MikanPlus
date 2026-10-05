@@ -1,4 +1,4 @@
-//! 滚动位置保留回归测试:外部持有的 ScrollHandle 在页面切换(窗口重建)后仍保留偏移。
+//! Scroll-position persistence regression test: an externally held ScrollHandle keeps its offset across page switches (window rebuilds).
 
 use gpui_kit::TestAppContext;
 use gpui_kit::VisualTestContext;
@@ -7,6 +7,7 @@ use gpui_kit::{
     point, prelude::*, px,
 };
 
+/// Minimal scroll container tracked by an external handle.
 struct ScrollFixture {
     handle: ScrollHandle,
 }
@@ -30,6 +31,7 @@ impl Render for ScrollFixture {
     }
 }
 
+/// Opens a 1200x800 fixture window sharing the given scroll handle.
 fn setup(cx: &mut TestAppContext, handle: ScrollHandle) -> VisualTestContext {
     let window = cx.update(|cx| {
         cx.open_window(Default::default(), |_, cx| {
@@ -48,13 +50,14 @@ fn setup(cx: &mut TestAppContext, handle: ScrollHandle) -> VisualTestContext {
     cx
 }
 
-/// 滚动事件后 handle 保存偏移;窗口关闭(页面切换)后 handle 仍保留偏移,
-/// 重新打开窗口(返回页面)后滚动位置得以恢复。
+/// The handle records the offset after a scroll event; it keeps that offset when
+/// the window is closed (page switch) and restores the scroll position when the
+/// window is reopened (returning to the page).
 #[gpui_kit::test]
 fn scroll_offset_survives_window_recreation(cx: &mut TestAppContext) {
     let handle = ScrollHandle::default();
 
-    // 第一次进入页面:滚动到中部
+    // First visit: scroll into the middle.
     let mut cx1 = setup(cx, handle.clone());
     cx1.simulate_event(ScrollWheelEvent {
         position: point(px(600.), px(400.)),
@@ -67,11 +70,11 @@ fn scroll_offset_survives_window_recreation(cx: &mut TestAppContext) {
     println!("offset after scroll: {:?}", offset_after_scroll);
     assert_ne!(offset_after_scroll, px(0.), "滚动后 offset 不应为 0");
 
-    // 模拟页面切换:窗口销毁
+    // Simulate a page switch: destroy the window.
     cx1.update(|window, _| window.remove_window());
     cx1.run_until_parked();
 
-    // 模拟返回页面:同一 handle 重新创建窗口
+    // Simulate returning: recreate the window with the same handle.
     let mut cx2 = setup(cx, handle.clone());
     let offset_after_reopen = handle.offset().y;
     println!("offset after reopen: {:?}", offset_after_reopen);
@@ -80,7 +83,7 @@ fn scroll_offset_survives_window_recreation(cx: &mut TestAppContext) {
         "页面重建后 handle 应保留滚动偏移"
     );
 
-    // 滚轮再次滚动,新窗口内的滚动应继续生效
+    // Scroll again with the wheel; scrolling should still work in the new window.
     cx2.simulate_event(ScrollWheelEvent {
         position: point(px(600.), px(400.)),
         delta: ScrollDelta::Pixels(point(px(0.), px(-400.))),

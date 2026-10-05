@@ -1,49 +1,44 @@
-//! 磁盘缓存:图片(永久 + 容量上限)+ 数据 JSON(TTL)。
+//! On-disk cache: cover images only.
 //!
-//! 目录结构(见 paths.rs):
+//! Live data (home / detail / search) is API-backed and cached in memory for the
+//! lifetime of the app (see `AppData`); only images are persisted, since they are
+//! large and effectively immutable.
+//!
+//! Directory layout (see paths.rs):
 //! ```text
 //! <cache_dir>/
-//! ├── images/<资源键-sha256>   # 封面图片,永久缓存,总量上限 512MB(LRU)
-//! ├── list.json                  # 列表页(30 分钟 TTL)
-//! ├── detail/<id>.json           # 详情页(24 小时 TTL)
-//! └── search/<q-hash>.json       # 搜索(10 分钟 TTL)
+//! └── images/<resource-key-sha256>  # cover images, cached permanently, 512MB total cap (LRU)
 //! ```
 
 use std::{
     path::{Path, PathBuf},
-    time::{Duration, SystemTime},
+    time::SystemTime,
 };
 
 use sha2::{Digest, Sha256};
 
-/// 列表页缓存 TTL
-pub const LIST_TTL: Duration = Duration::from_secs(30 * 60);
-/// 详情页缓存 TTL
-pub const DETAIL_TTL: Duration = Duration::from_secs(24 * 60 * 60);
-/// 搜索缓存 TTL
-pub const SEARCH_TTL: Duration = Duration::from_secs(10 * 60);
-
-/// 图片缓存总量软上限(字节)
+/// Soft cap on total image-cache size (bytes)
 const IMAGE_CACHE_LIMIT: u64 = 512 * 1024 * 1024;
-/// 超限后清理到的目标比例(80%)
+/// Target ratio to prune down to once the cap is exceeded (80%)
 const IMAGE_CACHE_TARGET_RATIO: f64 = 0.8;
 
 fn ensure_dir(dir: &Path) {
     let _ = std::fs::create_dir_all(dir);
 }
 
-/// URL → 缓存文件名(SHA-256 十六进制)
+/// URL → cache filename (SHA-256 hex)
 fn url_hash(url: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(url.as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
-/// 图片资源缓存键:与来源主机无关。
+/// Image resource cache key: independent of the source host.
 ///
-/// 同一路径在 mikanani.me 与备用域名 mikanime.tv 下是同一份资源,
-/// 切换数据源域名不应导致重新下载或产生重复缓存。键由「路径 + 查询串」决定
-/// (查询串会改变服务器返回的内容,如尺寸裁剪,因此保留)。
+/// The same path on mikanani.me and the alternate domain mikanime.tv is the same
+/// resource, so switching source domains should not trigger a re-download or
+/// create duplicate cache entries. The key is derived from "path + query string"
+/// (the query string changes what the server returns, e.g. size cropping, so it is kept).
 fn image_key(url: &str) -> String {
     let path = url
         .strip_prefix("https://")
@@ -54,90 +49,22 @@ fn image_key(url: &str) -> String {
     url_hash(&path)
 }
 
-fn fresh(path: &Path, ttl: Duration) -> bool {
-    std::fs::metadata(path)
-        .and_then(|m| m.modified())
-        .map(|t| {
-            SystemTime::now()
-                .duration_since(t)
-                .map(|age| age < ttl)
-                .unwrap_or(false)
-        })
-        .unwrap_or(false)
-}
+// ── Image cache (permanent) ─────────────────────
 
-// ── 数据缓存(JSON) ─────────────────────────────
-
-/// 读取未过期的 JSON 缓存
-pub fn cached_json(key: &str, ttl: Duration) -> Option<serde_json::Value> {
-    let path = json_path(key);
-    if !fresh(&path, ttl) {
-        return None;
-    }
-    std::fs::read_to_string(&path)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-}
-
-/// 写入 JSON 缓存(原子:临时文件 + rename,杜绝半截文件)
-pub fn store_json(key: &str, value: &serde_json::Value) {
-    let path = json_path(key);
-    if let Some(dir) = path.parent() {
-        ensure_dir(dir);
-    }
-    if let Ok(text) = serde_json::to_string(value) {
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
-        }
-    }
-}
-
-/// 列表页缓存路径
-fn json_path(key: &str) -> PathBuf {
-    // key 形如 "list" / "detail/3883" / "search/abc"
-    crate::paths::app_cache_dir().join(format!("{key}.json"))
-}
-
-/// 列表页缓存
-pub fn cached_list() -> Option<serde_json::Value> {
-    cached_json("list", LIST_TTL)
-}
-pub fn store_list(value: &serde_json::Value) {
-    store_json("list", value);
-}
-
-/// 详情页缓存
-pub fn cached_detail(id: u32) -> Option<serde_json::Value> {
-    cached_json(&format!("detail/{id}"), DETAIL_TTL)
-}
-pub fn store_detail(id: u32, value: &serde_json::Value) {
-    store_json(&format!("detail/{id}"), value);
-}
-
-/// 搜索结果缓存
-pub fn cached_search(q: &str) -> Option<serde_json::Value> {
-    cached_json(&format!("search/{}", url_hash(q)), SEARCH_TTL)
-}
-pub fn store_search(q: &str, value: &serde_json::Value) {
-    store_json(&format!("search/{}", url_hash(q)), value);
-}
-
-// ── 图片缓存(永久) ─────────────────────────────
-
-/// 图片缓存文件路径;未缓存或文件损坏(空文件)时返回 None
+/// Image cache file path; returns None when not cached or the file is damaged (empty)
 pub fn cached_image(url: &str) -> Option<PathBuf> {
     let path = image_path(url);
     let ok = std::fs::metadata(&path).is_ok_and(|m| m.len() > 0);
     if !ok {
         return None;
     }
-    // 读取即更新 mtime,使 LRU 按最近使用淘汰
+    // Touch mtime on read so LRU evicts by most-recently-used
     let _ = filetime_touch(&path);
     Some(path)
 }
 
-/// 更新文件 mtime(读取命中时保持 LRU 语义);失败静默忽略
+/// Update the file mtime (preserves LRU semantics on read hits); failures are
+/// silently ignored
 fn filetime_touch(path: &Path) -> std::io::Result<()> {
     let now = filetime::FileTime::now();
     filetime::set_file_mtime(path, now)
@@ -149,7 +76,8 @@ fn image_path(url: &str) -> PathBuf {
         .join(image_key(url))
 }
 
-/// 保存图片到缓存(原子:临时文件 + rename,杜绝半截文件被命中)
+/// Save an image to the cache (atomic: temp file + rename, preventing a partial
+/// file from being hit)
 pub fn store_image(url: &str, bytes: &[u8]) -> Option<PathBuf> {
     let path = image_path(url);
     if let Some(dir) = path.parent() {
@@ -164,9 +92,10 @@ pub fn store_image(url: &str, bytes: &[u8]) -> Option<PathBuf> {
     }
 }
 
-/// 图片缓存容量治理:总量超过软上限时,按修改时间删除最旧的,
-/// 直到回到上限的 80%(LRU 近似,图片无写入只有首次保存,mtime ≈ 首次访问)。
-/// 启动时调用一次(后台线程)。
+/// Image-cache size management: when the total exceeds the soft cap, delete the
+/// oldest by modification time until usage falls back to 80% of the cap (an LRU
+/// approximation: images are only written once on first save, so mtime ≈ first
+/// access). Called once at startup (background thread).
 pub fn enforce_image_cache_limit() {
     let images = crate::paths::app_cache_dir().join("images");
     let Ok(entries) = std::fs::read_dir(&images) else {
@@ -192,7 +121,7 @@ pub fn enforce_image_cache_limit() {
     }
 
     let target = (IMAGE_CACHE_LIMIT as f64 * IMAGE_CACHE_TARGET_RATIO) as u64;
-    // 最旧的在前
+    // Oldest first
     files.sort_by_key(|(mtime, _, _)| *mtime);
     let mut freed = 0u64;
     for (_, path, size) in files {
@@ -210,7 +139,7 @@ pub fn enforce_image_cache_limit() {
     );
 }
 
-/// 清空全部缓存(设置页可触发)
+/// Clear the entire cache (triggerable from the settings page)
 pub fn clear_all() {
     let _ = std::fs::remove_dir_all(crate::paths::app_cache_dir());
 }
@@ -231,7 +160,7 @@ mod tests {
 
     #[test]
     fn image_key_is_host_independent() {
-        // 同一路径在不同数据源域名下共享同一缓存键
+        // The same path shares one cache key across source domains
         assert_eq!(
             image_key("https://mikanani.me/images/a.jpg?width=400&height=560"),
             image_key("https://mikanime.tv/images/a.jpg?width=400&height=560"),
@@ -240,17 +169,17 @@ mod tests {
             image_key("https://mikanani.me/images/a.jpg"),
             image_key("https://mikanime.tv/images/a.jpg"),
         );
-        // 查询串影响返回内容,应区分(尺寸裁剪)
+        // Query strings change the returned content, so they must be distinguished (size cropping)
         assert_ne!(
             image_key("https://mikanani.me/images/a.jpg?width=400&height=400"),
             image_key("https://mikanani.me/images/a.jpg?width=400&height=560"),
         );
-        // 不同路径区分
+        // Different paths are distinguished
         assert_ne!(
             image_key("https://mikanani.me/images/a.jpg"),
             image_key("https://mikanani.me/images/b.jpg"),
         );
-        // 相对路径 / 无主机 URL 原样参与哈希
+        // Relative / host-less URLs are hashed as-is
         assert_eq!(image_key("/images/a.jpg"), image_key("/images/a.jpg"),);
     }
 

@@ -1,32 +1,18 @@
 //! MikanPlus application presentation built on GPUI Kit.
 
 pub mod actions;
-pub mod app_theme;
-pub mod bangumi_card;
-pub mod bangumi_detail_page;
-pub mod download_collection_page;
-pub mod download_observer_page;
-pub mod episode_row;
-pub mod home_view;
-pub mod icons;
-pub mod layout;
-pub mod load_state;
-pub mod poster;
-pub mod search_result_page;
-pub mod settings_page;
-pub mod spinner;
-pub mod subgroup_detail_page;
-pub mod subscription_page;
-pub mod toolbar;
+pub mod components;
+pub mod pages;
+pub mod theme;
 
-pub use bangumi_card::{BangumiCard, BangumiFormat};
-pub use bangumi_detail_page::BangumiDetailPage;
-pub use download_collection_page::DownloadCollectionPage;
-pub use download_observer_page::DownloadObserverPage;
-pub use home_view::HomeView;
-pub use load_state::{GroupEpisodesState, ToggleGroupCallback};
-pub use search_result_page::SearchResultPage;
-pub use settings_page::SettingsPage;
-pub use subgroup_detail_page::SubGroupDetailPage;
-pub use subscription_page::SubscriptionPage;
-pub use toolbar::Toolbar;
+pub use components::bangumi_card::{BangumiCard, BangumiFormat};
+pub use components::load_state::{GroupEpisodesState, ToggleGroupCallback};
+pub use components::toolbar::Toolbar;
+pub use pages::bangumi_detail_page::BangumiDetailPage;
+pub use pages::download_collection_page::DownloadCollectionPage;
+pub use pages::download_observer_page::DownloadObserverPage;
+pub use pages::home_view::HomeView;
+pub use pages::search_result_page::SearchResultPage;
+pub use pages::settings_page::SettingsPage;
+pub use pages::subgroup_detail_page::SubGroupDetailPage;
+pub use pages::subscription_page::SubscriptionPage;

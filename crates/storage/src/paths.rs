@@ -1,13 +1,13 @@
-//! 跨平台应用目录。
+//! Cross-platform application directories.
 //!
-//! 遵循各平台惯例:
-//! - macOS: `~/Library/Application Support/<App>`(数据)、`~/Library/Caches/<App>`(缓存)
-//! - Linux: `$XDG_DATA_HOME/<app>` / `$XDG_CACHE_HOME/<app>`(默认 `~/.local/share` / `~/.cache`)
-//! - Windows: `%APPDATA%\<App>`(数据)、`%LOCALAPPDATA%\<App>`(缓存)
+//! Follows each platform's conventions:
+//! - macOS: `~/Library/Application Support/<App>` (data), `~/Library/Caches/<App>` (cache)
+//! - Linux: `$XDG_DATA_HOME/<app>` / `$XDG_CACHE_HOME/<app>` (defaults `~/.local/share` / `~/.cache`)
+//! - Windows: `%APPDATA%\<App>` (data), `%LOCALAPPDATA%\<App>` (cache)
 
 use std::path::{Path, PathBuf};
 
-/// 用户数据目录(订阅记录、设置——不可丢失)
+/// User data directory (subscriptions, settings — must not be lost)
 pub fn app_data_dir() -> PathBuf {
     let name = "MikanPlus";
     #[cfg(target_os = "macos")]
@@ -37,7 +37,7 @@ pub fn app_data_dir() -> PathBuf {
     }
 }
 
-/// 缓存目录(图片、列表/详情 JSON——可重新获取,允许被系统清理)
+/// Cache directory (images, list/detail JSON — re-fetchable, may be cleared by the system)
 pub fn app_cache_dir() -> PathBuf {
     let name = "MikanPlus";
     #[cfg(target_os = "macos")]
@@ -64,11 +64,12 @@ pub fn app_cache_dir() -> PathBuf {
     }
 }
 
-/// 默认下载目录(三平台均为 `~/Videos`;Linux 尊重 xdg-user-dirs 的重定向)。
+/// Default download directory (`~/Videos` on all three platforms; Linux honors
+/// xdg-user-dirs redirection).
 pub fn video_dir() -> PathBuf {
     #[cfg(target_os = "linux")]
     {
-        // 读取 ~/.config/user-dirs.dirs 中的 XDG_VIDEOS_DIR,失败则回退 ~/Videos
+        // Read XDG_VIDEOS_DIR from ~/.config/user-dirs.dirs; fall back to ~/Videos on failure
         let cfg = home().join(".config").join("user-dirs.dirs");
         if let Ok(text) = std::fs::read_to_string(cfg) {
             for line in text.lines() {
@@ -93,8 +94,9 @@ pub fn video_dir() -> PathBuf {
     }
 }
 
-/// librqbit 默认的 DHT 持久化路径(第三方默认,待迁入我们的数据目录)。
-/// 对应 `directories` crate 的 cache_dir + "com.rqbit.dht/dht.json"。
+/// librqbit's default DHT persistence path (third-party default, to be migrated
+/// into our data directory). Corresponds to the `directories` crate's
+/// cache_dir + "com.rqbit.dht/dht.json".
 pub fn librqbit_dht_default() -> PathBuf {
     #[cfg(target_os = "macos")]
     {
@@ -126,7 +128,7 @@ pub fn librqbit_dht_default() -> PathBuf {
     }
 }
 
-/// 用系统默认程序打开文件或目录。
+/// Open a file or directory with the system default application.
 pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     let mut cmd = {
@@ -155,7 +157,7 @@ pub fn open_path(path: &std::path::Path) -> std::io::Result<()> {
     cmd.spawn().map(|_| ())
 }
 
-/// 用系统默认浏览器打开 HTTP(S) URL。
+/// Open an HTTP(S) URL in the system default browser.
 pub fn open_url(url: &str) -> std::io::Result<()> {
     let url = url.trim();
     let lower = url.to_ascii_lowercase();
@@ -168,8 +170,9 @@ pub fn open_url(url: &str) -> std::io::Result<()> {
     open_path(std::path::Path::new(url))
 }
 
-/// 清洗文件/目录名(跨平台):替换 Windows 非法字符 `\ / : * ? " < > |`,
-/// 压缩空白、去掉首尾空格与点;空结果回退「未命名」。
+/// Sanitize a file/directory name (cross-platform): replace the Windows-illegal
+/// characters `\ / : * ? " < > |`, collapse whitespace, and trim leading/trailing
+/// spaces and dots; an empty result falls back to the literal `"未命名"`.
 pub fn sanitize_file_name(name: &str) -> String {
     let s: String = name
         .chars()
@@ -187,10 +190,10 @@ pub fn sanitize_file_name(name: &str) -> String {
     }
 }
 
-/// 字幕组级别的下载目录:`<下载目录>/<番剧名称> - <字幕组名称>`。
+/// Subgroup-level download directory: `<download dir>/<bangumi name> - <subgroup name>`.
 ///
-/// 目录名包含字幕组信息,防止不同字幕组的文件落入同一文件夹;
-/// 取消订阅时按此路径整体移除。
+/// The directory name includes the subgroup so files from different subgroups do
+/// not land in the same folder; on unsubscribe the whole path is removed.
 pub fn subgroup_download_dir(base_dir: &Path, bangumi_name: &str, group_name: &str) -> PathBuf {
     base_dir.join(format!(
         "{} - {}",

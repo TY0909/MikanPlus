@@ -1,61 +1,77 @@
-/// 顶层分区(工具栏分段导航):首页 / 订阅 / 设置。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TopSection {
+use crate::id::{BangumiId, SubgroupRef};
+
+/// A top-level destination. Each owns its own navigation stack, so switching between
+/// sections preserves where you were in each one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Section {
     Home,
     Subscription,
+    Download,
     Settings,
 }
 
-impl TopSection {
-    pub const ALL: [TopSection; 3] = [
-        TopSection::Home,
-        TopSection::Subscription,
-        TopSection::Settings,
-    ];
+impl Section {
+    /// Sections shown as toolbar tabs, in order. `Download` is opened by its own toolbar
+    /// button rather than a tab.
+    pub const TABS: [Section; 3] = [Section::Home, Section::Subscription, Section::Settings];
 
-    /// 页面 → 对应的顶层分区;详情/搜索等子页面返回 None。
-    pub fn from_page(page: &Page) -> Option<TopSection> {
+    /// The page shown when the section is entered for the first time.
+    pub fn root_page(&self) -> Page {
+        match self {
+            Section::Home => Page::Home(HomeFilter::Today),
+            Section::Subscription => Page::Subscription,
+            Section::Download => Page::DownloadObserver,
+            Section::Settings => Page::Settings,
+        }
+    }
+
+    /// The section a page is the root of; sub-pages (detail, search, …) return `None`.
+    pub fn from_page(page: &Page) -> Option<Section> {
         match page {
-            Page::Home(_) => Some(TopSection::Home),
-            Page::Subscription => Some(TopSection::Subscription),
-            Page::Settings => Some(TopSection::Settings),
+            Page::Home(_) => Some(Section::Home),
+            Page::Subscription => Some(Section::Subscription),
+            Page::DownloadObserver => Some(Section::Download),
+            Page::Settings => Some(Section::Settings),
             _ => None,
         }
     }
 
+    /// Display name shown in the toolbar.
     pub fn label(&self) -> &'static str {
         match self {
-            TopSection::Home => "首页",
-            TopSection::Subscription => "我的订阅",
-            TopSection::Settings => "设置",
+            Section::Home => "首页",
+            Section::Subscription => "我的订阅",
+            Section::Download => "下载",
+            Section::Settings => "设置",
         }
     }
 }
 
-/// 首页的视图筛选。
+/// Home-page view filter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HomeFilter {
-    /// 今日更新:高亮今天的星期分组,随后展示全部番剧
+    /// Today: highlight today's weekday group, then show all anime.
     Today,
-    /// 某个星期分组,0=周一 … 6=周日
+    /// A single weekday group, 0 = Monday … 6 = Sunday.
     Weekday(usize),
-    /// 剧场版
+    /// Movie (theatrical) releases.
     Movies,
 }
 
 impl HomeFilter {
-    /// 菜单与页面标题使用的显示名称
+    /// Display name used in menus and page titles.
     pub fn label(&self) -> &'static str {
         match self {
             HomeFilter::Today => "今日更新",
-            // 防御:Weekday 可由任意代码构造,越界时兜底(不 panic)
+            // Defensive fallback: Weekday can be built by arbitrary code, so keep
+            // out-of-range values from panicking.
             HomeFilter::Weekday(day) => WEEKDAY_NAMES.get(*day).copied().unwrap_or("星期"),
             HomeFilter::Movies => "剧场版",
         }
     }
 }
 
-/// 星期名称(0=周一 … 6=周日)
+/// Weekday names (0 = Monday … 6 = Sunday).
 pub const WEEKDAY_NAMES: [&str; 7] = [
     "星期一",
     "星期二",
@@ -66,19 +82,26 @@ pub const WEEKDAY_NAMES: [&str; 7] = [
     "星期日",
 ];
 
-/// 星期短名(用于卡片角标等紧凑场景)
+/// Short weekday names (for compact places such as card badges).
 pub const WEEKDAY_SHORT: [&str; 7] = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"];
 
+/// The page currently being shown (navigation state).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Page {
     Home(HomeFilter),
     Subscription,
     Settings,
-    BangumiDetail(String),
-    SubGroupDetail(u32, u32),
+    /// Anime detail page: the anime's identity plus its display name.
+    BangumiDetail {
+        bangumi_id: BangumiId,
+        name: String,
+    },
+    /// Subtitle-group detail page (which subgroup offering of which bangumi).
+    SubGroupDetail(SubgroupRef),
+    /// Keyword search results (the query; empty opens the search page).
     SearchResult(String),
-    /// 正在进行中的下载任务观测页
+    /// Observer page for in-progress download tasks.
     DownloadObserver,
-    /// 已完成的多视频下载任务详情(info hash)
+    /// Detail page for a completed multi-file download (task info hash).
     DownloadCollection(String),
 }

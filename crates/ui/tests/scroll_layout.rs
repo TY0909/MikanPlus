@@ -1,4 +1,4 @@
-//! 滚动机制回归测试 + 布局环境调查。
+//! Scroll-mechanism regression tests plus layout-environment investigation.
 
 use gpui_kit::TestAppContext;
 use gpui_kit::VisualTestContext;
@@ -7,16 +7,17 @@ use gpui_kit::{
     point, prelude::*, px,
 };
 
+/// Fixed 800px scroll container holding 3000px of content; used as a probe host.
 struct ScrollFixture {
     handle: ScrollHandle,
 }
 
-/// 模拟真实应用完整布局链
+/// Mirrors the real app's full layout chain using flex_1 and explicit heights.
 struct RealAppFixture {
     handle: ScrollHandle,
 }
 
-/// 绝对定位方案:所有尺寸显式
+/// Absolute-positioning approach in which every size is explicit.
 struct AbsoluteFixture {
     handle: ScrollHandle,
 }
@@ -141,7 +142,7 @@ impl Render for RealAppFixture {
 
 impl Render for ScrollFixture {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // 滚动容器:确定高度 800px;内容 3000px,必然溢出
+        // Scroll container: fixed 800px height with 3000px of content, so it always overflows.
         div()
             .id("scroller")
             .debug_selector(|| "scroller".to_string())
@@ -159,6 +160,7 @@ impl Render for ScrollFixture {
     }
 }
 
+/// Opens a 1200x800 fixture window and returns its scroll handle and test context.
 fn setup(cx: &mut TestAppContext) -> (ScrollHandle, VisualTestContext) {
     let handle = ScrollHandle::default();
     let window = cx.update(|cx| {
@@ -178,6 +180,7 @@ fn setup(cx: &mut TestAppContext) -> (ScrollHandle, VisualTestContext) {
     (handle, cx)
 }
 
+/// A wheel event over the scroller changes its scroll offset.
 #[gpui_kit::test]
 fn scroll_wheel_moves_scroll_offset(cx: &mut TestAppContext) {
     let (handle, mut cx) = setup(cx);
@@ -203,15 +206,16 @@ fn scroll_wheel_moves_scroll_offset(cx: &mut TestAppContext) {
     assert_ne!(offset.y, px(0.), "滚轮事件后滚动位置应发生变化");
 }
 
+/// Reports window bounds and probes cross-axis sizing for fixed and stretch children.
 #[gpui_kit::test]
 fn window_bounds_and_flex(cx: &mut TestAppContext) {
     let (_, mut cx) = setup(cx);
 
-    // 窗口逻辑尺寸
+    // Window logical bounds.
     let bounds = cx.update(|window, _| window.bounds());
     println!("window.bounds() = {:?}", bounds);
 
-    // 渲染一个 flex_row:固定项 + stretch 项,检查交叉轴高度
+    // Render a flex_row with a fixed child plus a stretch child to inspect cross-axis height.
     cx.draw(
         point(px(0.), px(0.)),
         Size::new(px(1200.), px(800.)),
@@ -237,7 +241,7 @@ fn window_bounds_and_flex(cx: &mut TestAppContext) {
     let b = cx.debug_bounds("b").expect("b");
     println!("draw-test row={:?} a={:?} b={:?}", row, a, b);
 
-    // 判别实验:交叉轴显式 100% 高度是否生效
+    // Diagnostic experiment: does an explicit 100% cross-axis height take effect?
     cx.draw(
         point(px(0.), px(0.)),
         Size::new(px(1200.), px(800.)),
@@ -268,9 +272,10 @@ fn window_bounds_and_flex(cx: &mut TestAppContext) {
     println!("pct-test c={:?} d={:?}", c, d);
 }
 
+/// The full app chain with explicit h_full heights keeps the scroller at viewport height.
 #[gpui_kit::test]
 fn real_app_chain_with_h_full(cx: &mut TestAppContext) {
-    // 模拟真实应用完整链:所有高度用显式 h_full,不依赖 stretch
+    // Full real-app chain, but every height uses an explicit h_full instead of relying on stretch.
     let handle = ScrollHandle::default();
     let window = cx.update(|cx| {
         cx.open_window(Default::default(), |_, cx| {
@@ -302,6 +307,7 @@ fn real_app_chain_with_h_full(cx: &mut TestAppContext) {
     );
 }
 
+/// Probes whether flex_1 fills the remaining height in a flex_col under draw.
 #[gpui_kit::test]
 fn draw_env_flex_behavior(cx: &mut TestAppContext) {
     let window = cx.update(|cx| {
@@ -318,7 +324,7 @@ fn draw_env_flex_behavior(cx: &mut TestAppContext) {
         height: px(800.),
     });
 
-    // 在 draw(明确根尺寸)环境中验证 flex_col 的 flex_1 是否生效
+    // In a draw call with an explicit root size, check whether flex_1 works in a flex_col.
     cx.draw(
         point(px(0.), px(0.)),
         Size::new(px(1200.), px(800.)),
@@ -349,6 +355,7 @@ fn draw_env_flex_behavior(cx: &mut TestAppContext) {
     println!("grow-test col={:?} head={:?} rest={:?}", col, head, rest);
 }
 
+/// Probes cross-axis stretch for a width-only child in a flex_row under draw.
 #[gpui_kit::test]
 fn draw_env_stretch_behavior(cx: &mut TestAppContext) {
     let window = cx.update(|cx| {
@@ -365,7 +372,7 @@ fn draw_env_stretch_behavior(cx: &mut TestAppContext) {
         height: px(800.),
     });
 
-    // 验证 flex_row 交叉轴 stretch
+    // Check cross-axis stretch in a flex_row.
     cx.draw(
         point(px(0.), px(0.)),
         Size::new(px(1200.), px(800.)),
@@ -387,9 +394,10 @@ fn draw_env_stretch_behavior(cx: &mut TestAppContext) {
     println!("stretch-test only={:?}", only);
 }
 
+/// Absolute positioning with explicit sizes yields the expected scroller height.
 #[gpui_kit::test]
 fn absolute_layout_scroll_height(cx: &mut TestAppContext) {
-    // 验证绝对定位 + 显式高度方案:所有尺寸显式,不依赖 flex grow/stretch
+    // Verify the absolute-positioning plus explicit-height approach: every size is explicit and nothing relies on flex grow/stretch.
     let handle = ScrollHandle::default();
     let window = cx.update(|cx| {
         cx.open_window(Default::default(), |_, cx| {
@@ -409,7 +417,7 @@ fn absolute_layout_scroll_height(cx: &mut TestAppContext) {
     let wrap = cx.debug_bounds("content-wrap").expect("content-wrap");
     let scroller = cx.debug_bounds("scroller").expect("scroller");
     println!("ABS wrap={:?} scroller={:?}", wrap, scroller);
-    // 视口 800 - 工具栏 48 = 752
+    // Viewport 800 - toolbar 48 = 752.
     assert!(
         scroller.size.height > px(700.) && scroller.size.height < px(780.),
         "绝对定位方案滚动容器高度应为 752,实际 {:?}",
@@ -417,9 +425,10 @@ fn absolute_layout_scroll_height(cx: &mut TestAppContext) {
     );
 }
 
+/// Probes whether flex_1 reliably grows width horizontally.
 #[gpui_kit::test]
 fn horizontal_flex_grow_width(cx: &mut TestAppContext) {
-    // 验证水平方向 flex_1(宽度)是否可靠
+    // Check whether horizontal flex_1 (width) grows reliably.
     let window = cx.update(|cx| {
         cx.open_window(Default::default(), |_, cx| {
             cx.new(|_cx| ScrollFixture {
@@ -463,9 +472,10 @@ fn horizontal_flex_grow_width(cx: &mut TestAppContext) {
     println!("HGROW side={:?} grow={:?}", side, grow);
 }
 
+/// Probes the coordinate origin for absolute children inside a padded relative parent.
 #[gpui_kit::test]
 fn absolute_inset_with_padding(cx: &mut TestAppContext) {
-    // 验证绝对定位在带 padding 的 relative 父容器中的坐标基准(详情页 Hero 右列定位依赖)
+    // Verify the coordinate origin for absolute positioning inside a padded relative parent (the detail page's Hero right column depends on this).
     let window = cx.update(|cx| {
         cx.open_window(Default::default(), |_, cx| {
             cx.new(|_cx| ScrollFixture {

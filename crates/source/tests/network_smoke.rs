@@ -1,10 +1,11 @@
-//! 端到端网络冒烟:真实请求蜜柑 API/RSS → 列表 → 详情 → 字幕组剧集 → 封面缓存。
-//! 需要网络;失败时打印具体错误用于诊断(网络受限时不判失败)。
+//! End-to-end network smoke test: real requests to the Mikan API/RSS → list → detail → subgroup episodes → cover cache.
+//! Requires network access; on failure it prints the specific error for diagnostics (a restricted network does not fail the run).
 
 #[test]
 fn end_to_end_smoke() {
-    // 1. 首页列表(JSON API)
-    let groups = match source::api::fetch_home() {
+    let network = source::Network::new();
+    // 1. Home list (JSON API).
+    let groups = match source::api::fetch_home(&network) {
         Ok(g) => g,
         Err(e) => {
             eprintln!("LIST_FETCH_FAIL: {e}");
@@ -15,7 +16,7 @@ fn end_to_end_smoke() {
     println!("首页: {} 分组 / {total} 番剧", groups.len());
     assert!(total > 0, "首页应返回番剧");
 
-    // 2. 下载第一张封面并验证缓存
+    // 2. Download the first cover and verify caching.
     let Some(item) = groups
         .iter()
         .flat_map(|g| g.items.iter())
@@ -26,7 +27,7 @@ fn end_to_end_smoke() {
     };
     let url = item.cover_url.clone().unwrap();
     println!("封面: {url}");
-    match source::network::fetch_bytes(&url) {
+    match network.fetch_bytes(&url) {
         Ok(bytes) => {
             println!("图片: {} bytes", bytes.len());
             assert!(bytes.len() > 1000, "图片数据量异常");
@@ -38,14 +39,12 @@ fn end_to_end_smoke() {
         Err(e) => eprintln!("IMAGE_FETCH_FAIL: {e}"),
     }
 
-    // 3. 详情(JSON API) → 字幕组摘要(不含剧集)
-    // 新番可能暂无字幕组,顺序往后找第一个有字幕组的番剧
-    let mut found: Option<(u32, domain::BangumiItem)> = None;
+    // 3. Detail (JSON API) → subtitle-group summary (episodes not included).
+    // A new show may have no subtitle groups yet, so scan forward for the first show that has one.
+    let mut found: Option<(domain::BangumiId, domain::BangumiItem)> = None;
     for candidate in groups.iter().flat_map(|g| g.items.iter()) {
-        let Some(bid) = candidate.bangumi_id else {
-            continue;
-        };
-        match source::api::fetch_bangumi(bid) {
+        let bid = candidate.bangumi_id;
+        match source::api::fetch_bangumi(&network, bid) {
             Ok(detail) if !detail.subtitle_groups.is_empty() => {
                 println!(
                     "详情: {} / {} 个字幕组",
@@ -67,17 +66,17 @@ fn end_to_end_smoke() {
         return;
     };
 
-    // 4. 懒加载第一个字幕组的剧集(RSS)
-    let Some(group) = detail
+    // 4. Lazily load the episodes of the first subtitle group (RSS).
+    let Some((group, sid)) = detail
         .subtitle_groups
         .iter()
-        .find(|g| g.subgroup_id.is_some())
+        .map(|g| (g, g.subgroup_id))
+        .find(|(_, sid)| sid.is_known())
     else {
         eprintln!("NO_SUBGROUP_ID");
         return;
     };
-    let sid = group.subgroup_id.unwrap();
-    match source::rss::fetch_subgroup_episodes(bid, sid) {
+    match source::rss::fetch_subgroup_episodes(&network, bid, sid) {
         Ok(episodes) => {
             println!("字幕组「{}」: {} 集", group.name, episodes.len());
             if episodes.is_empty() {

@@ -2,8 +2,10 @@
 
 pub mod api;
 pub mod error;
-pub mod network;
 pub mod parser;
 pub mod rss;
 
+mod network;
+
 pub use error::SourceError;
+pub use network::{ImgStatus, Network};

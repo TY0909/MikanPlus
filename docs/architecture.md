@@ -26,7 +26,7 @@ Owns serialized domain records and navigation values. It has no GPUI, network, f
 
 ### `storage`
 
-Owns local state, cache layout, migrations, application directories, filename normalization, and platform operations for opening files and URLs.
+Owns local state, the on-disk cover-image cache, migrations, application directories, filename normalization, and platform operations for opening files and URLs. Live API data (home / detail / search) is cached in memory for the session rather than on disk.
 
 ### `source`
 

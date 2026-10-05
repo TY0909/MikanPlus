@@ -1,28 +1,32 @@
-//! 蜜柑计划 HTML 解析(仅搜索页)。
+//! Mikan Project HTML parsing (search page only).
 //!
-//! 列表与详情已改用公开 JSON API(见 [`crate::api`] 与 [`crate::rss`]),
-//! 搜索没有对应 API,继续走服务端渲染的 HTML。
+//! Lists and details now use the public JSON API (see [`crate::api`] and
+//! [`crate::rss`]); search has no equivalent API and keeps using the
+//! server-rendered HTML.
 //!
-//! 已验证的搜索页结构(mikanani.me, 2026-08):
-//! - 番剧卡片:`li a[href='/Home/Bangumi/<id>']` 内 `span[data-src]` + `div.an-text`
-//! - 剧集表:`tr.js-search-results-row`
-//!   - `input.js-episode-select[data-magnet]` 磁力
-//!   - `a.magnet-link-wrap` 标题
-//!   - 第 3/4 个 td:大小 / 更新时间
+//! Verified search-page structure (mikanani.me, 2026-08):
+//! - Bangumi cards: `li a[href='/Home/Bangumi/<id>']` containing `span[data-src]` + `div.an-text`
+//! - Episode table: `tr.js-search-results-row`
+//!   - `input.js-episode-select[data-magnet]` magnet
+//!   - `a.magnet-link-wrap` title
+//!   - 3rd/4th `td`: size / update time
 
 use scraper::{ElementRef, Html, Selector};
 
-use domain::{BangumiItem, SearchEpisode, SearchResults};
+use domain::{BangumiId, BangumiItem, SearchEpisode, SearchResults};
 
-/// 搜索页:磁力输入(与详情页剧集行同签名)
+use crate::Network;
+
+/// Search page: magnet input (same signature as detail-page episode rows)
 const SEL_EPISODE_MAGNET: &str = "input.js-episode-select";
-/// 搜索页:剧集标题链接
+/// Search page: episode title link
 const SEL_EPISODE_TITLE: &str = "a.magnet-link-wrap";
 
-/// 解析搜索结果页 → 番剧卡片 + 剧集列表。
+/// Parse a search-results page → bangumi cards + episode list.
 ///
-/// 搜索页封面为 400×400 方形,统一替换为 400×560 以匹配应用的竖版比例。
-pub fn parse_search_results(html: &str) -> SearchResults {
+/// Search-page covers are 400×400 squares; they are uniformly rewritten to
+/// 400×560 to match the app's portrait aspect ratio.
+pub fn parse_search_results(network: &Network, html: &str) -> SearchResults {
     let doc = Html::parse_document(html);
     let card_sel = Selector::parse("li a[href^='/Home/Bangumi/']").unwrap();
     let img_sel = Selector::parse("span[data-src]").unwrap();
@@ -32,7 +36,7 @@ pub fn parse_search_results(html: &str) -> SearchResults {
     let title_sel = Selector::parse(SEL_EPISODE_TITLE).unwrap();
     let td_sel = Selector::parse("td").unwrap();
 
-    // 番剧卡片
+    // Bangumi cards
     let mut items = Vec::new();
     for card in doc.select(&card_sel) {
         let href = card.value().attr("href").unwrap_or_default();
@@ -42,13 +46,13 @@ pub fn parse_search_results(html: &str) -> SearchResults {
         let Ok(bid) = bid_str.parse::<u32>() else {
             continue;
         };
-        // 封面:400×400 方形 → 400×560 竖版(与列表/详情一致)
+        // Cover: 400×400 square → 400×560 portrait (consistent with list/detail)
         let cover_url = card
             .select(&img_sel)
             .next()
             .and_then(|e| e.value().attr("data-src"))
             .map(|u| u.replace("width=400&height=400", "width=400&height=560"))
-            .map(|u| crate::network::site_url(&u));
+            .map(|u| network.site_url(&u));
         let name = card
             .select(&name_sel)
             .next()
@@ -61,14 +65,14 @@ pub fn parse_search_results(html: &str) -> SearchResults {
         }
         items.push(BangumiItem {
             name,
-            bangumi_id: Some(bid),
+            bangumi_id: BangumiId::from(bid),
             cover_url,
-            detail_url: Some(format!("{}/Home/Bangumi/{bid}", crate::network::base_url())),
+            detail_url: Some(format!("{}/Home/Bangumi/{bid}", network.base_url())),
             ..Default::default()
         });
     }
 
-    // 剧集结果行
+    // Episode result rows
     let mut episodes = Vec::new();
     for row in doc.select(&row_sel) {
         let magnet = row
@@ -138,12 +142,12 @@ mod tests {
                 </tbody>
             </table>
         </div>"#;
-        let results = parse_search_results(html);
+        let results = parse_search_results(&Network::new(), html);
         assert_eq!(results.items.len(), 1);
         let item = &results.items[0];
         assert_eq!(item.name, "碧蓝之海 第三季");
-        assert_eq!(item.bangumi_id, Some(4014));
-        // 方形封面应替换为 400×560 竖版
+        assert_eq!(item.bangumi_id, BangumiId::from(4014));
+        // Square covers should be rewritten to 400×560 portrait
         assert!(
             item.cover_url
                 .as_deref()
