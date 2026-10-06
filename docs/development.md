@@ -22,7 +22,7 @@ cargo build --release --locked -p app
 如果系统临时目录空间不足，可将 `TMPDIR` 指向项目的 `target/tmp`：
 
 ```bash
-TMPDIR=/home/ty/Projects/MikanPlus/target/tmp cargo test --workspace --all-features --locked
+TMPDIR="$PWD/target/tmp" cargo test --workspace --all-features --locked
 ```
 
 ## Workspace

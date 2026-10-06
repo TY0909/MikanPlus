@@ -1,8 +1,10 @@
 //! One-time startup migration: move old-layout caches and files to the new layout.
 //!
-//! - JSON caches named by historical versions (list-v2/v3, detail-v2/v3, the old
-//!   search directory) are all cleaned up; current code uniformly uses unversioned
-//!   names (see cache.rs)
+//! - Leftovers from the era when the home list and details were cached on disk
+//!   (list-v2/v3, detail-v2/v3, the old search directory) are deleted. Those disk
+//!   caches no longer exist — live data is held in memory for the session and only
+//!   cover images are persisted (see cache.rs) — but the files remain on
+//!   installations that upgraded from an older version
 //! - DHT routing table: librqbit's third-party default directory → the app data
 //!   directory (dht.dat)
 //!

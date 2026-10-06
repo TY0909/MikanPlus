@@ -104,7 +104,7 @@ cargo build --release --locked -p app
 If the system temporary directory is full, use the project-local directory:
 
 ```bash
-TMPDIR=/home/ty/Projects/MikanPlus/target/tmp cargo test --workspace --all-features --locked
+TMPDIR="$PWD/target/tmp" cargo test --workspace --all-features --locked
 ```
 
 Do not claim a command passed unless it was run successfully. Network smoke tests may require access to `mikanani.me`; report environmental failures separately from source failures.

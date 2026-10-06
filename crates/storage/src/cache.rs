@@ -139,7 +139,10 @@ pub fn enforce_image_cache_limit() {
     );
 }
 
-/// Clear the entire cache (triggerable from the settings page)
+/// Clear the entire cache.
+///
+/// Currently has no caller: the settings page only displays the cache directory path and can
+/// open it, it does not offer a "clear cache" action. Kept for a future entry point.
 pub fn clear_all() {
     let _ = std::fs::remove_dir_all(crate::paths::app_cache_dir());
 }
