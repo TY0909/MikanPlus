@@ -16,10 +16,10 @@ impl MikanPlus {
         name: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(Loadable::Ready(_) | Loadable::Loading) = self.data.details.get(&name) {
+        if let Some(Loadable::Ready(_) | Loadable::Loading) = self.data.details.get(&bangumi_id) {
             return;
         }
-        // Record bid → name for reverse-look-up of details that are loading / loaded
+        // Record bid → name so lookups still resolve while this detail is loading
         self.data.detail_names.insert(bangumi_id, name.clone());
         // User-initiated entry / retry: clear this detail page's backoff state and proceed immediately
         self.network
@@ -27,7 +27,7 @@ impl MikanPlus {
         // Keep the list / search name as the fetched item's display name
         let display_name = name.clone();
         let network = self.network.clone();
-        self.data.details.insert(name.clone(), Loadable::Loading);
+        self.data.details.insert(bangumi_id, Loadable::Loading);
         cx.notify();
         std::thread::spawn(move || {
             let item = source::api::fetch_bangumi(&network, bangumi_id).map(|mut item| {
@@ -36,7 +36,6 @@ impl MikanPlus {
             });
             publish(LoadUpdate::Detail {
                 bid: bangumi_id,
-                name,
                 item,
             });
         });
@@ -49,7 +48,7 @@ impl MikanPlus {
         name: String,
         cx: &mut Context<Self>,
     ) {
-        self.data.details.remove(&name);
+        self.data.details.remove(&bangumi_id);
         self.load_detail(bangumi_id, name, cx);
     }
 }

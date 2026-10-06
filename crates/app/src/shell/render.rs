@@ -280,13 +280,13 @@ impl MikanPlus {
         let loaded = self
             .data
             .details
-            .get(&name)
+            .get(&bangumi_id)
             .and_then(|s| s.ready())
             .cloned();
         let failed = self
             .data
             .details
-            .get(&name)
+            .get(&bangumi_id)
             .and_then(|s| s.failed())
             .cloned();
         // Fallback load trigger (first render before navigate); keep the error visible when already in a failed state
@@ -395,9 +395,10 @@ impl MikanPlus {
         // Locate the name by bangumi id while the detail isn't ready yet; capture the failed state before
         // triggering a reload, so the "error view" isn't overwritten by the Loading the reload writes back.
         let name = self.data.name_for(key.bangumi);
-        let failed = name
-            .as_ref()
-            .and_then(|name| self.data.details.get(name))
+        let failed = self
+            .data
+            .details
+            .get(&key.bangumi)
             .and_then(|s| s.failed())
             .cloned();
         let has_group = self

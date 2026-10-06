@@ -16,12 +16,11 @@ impl AppData {
             .cloned()
     }
 
-    /// Look up an entry by id among loaded details.
+    /// Look up an entry by id among loaded details (the cache is keyed by id).
     pub(crate) fn detail_with_id(&self, bangumi_id: BangumiId) -> Option<BangumiItem> {
         self.details
-            .iter()
-            .filter_map(|(_, state)| state.ready())
-            .find(|item| item.bangumi_id == bangumi_id)
+            .get(&bangumi_id)
+            .and_then(|state| state.ready())
             .cloned()
     }
 

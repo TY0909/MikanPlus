@@ -23,10 +23,10 @@ impl MikanPlus {
             .data
             .detail_names
             .iter()
-            .filter(|(_, name)| {
+            .filter(|(bangumi_id, _)| {
                 self.data
                     .details
-                    .get(*name)
+                    .get(*bangumi_id)
                     .is_some_and(|state| state.failed().is_some())
             })
             .map(|(bangumi_id, name)| (*bangumi_id, name.clone()))

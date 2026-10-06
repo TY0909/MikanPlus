@@ -137,9 +137,11 @@ pub(crate) struct Search {
 pub(crate) struct AppData {
     /// Home bangumi list.
     pub(crate) home: Loadable<Vec<BangumiGroup>>,
-    /// Bangumi details: name → data.
-    pub(crate) details: Cache<String, Loadable<BangumiItem>>,
-    /// bid → name for detail loads (used to reverse-look-up details that are loading or loaded).
+    /// Bangumi details, keyed by the stable [`BangumiId`] rather than the display name, so two
+    /// different bangumi that happen to share a title cannot overwrite each other.
+    pub(crate) details: Cache<BangumiId, Loadable<BangumiItem>>,
+    /// bid → display name while a detail is still loading or has failed; once it is ready the name
+    /// is read from the cached item.
     pub(crate) detail_names: HashMap<BangumiId, String>,
     /// Lazy subtitle-group episode loading: subgroup reference → data.
     pub(crate) episodes: Cache<SubgroupRef, Loadable<Vec<Episode>>>,
@@ -222,7 +224,6 @@ pub(crate) enum LoadUpdate {
     Home(Result<Vec<BangumiGroup>, SourceError>),
     Detail {
         bid: BangumiId,
-        name: String,
         item: Result<BangumiItem, SourceError>,
     },
     Episodes {
@@ -254,4 +255,38 @@ pub(crate) fn take_updates() -> Vec<LoadUpdate> {
 /// Current load-completion signal.
 pub(crate) fn load_version() -> u64 {
     LOAD_VERSION.load(Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn item(bangumi_id: u32, name: &str) -> BangumiItem {
+        BangumiItem {
+            name: name.to_string(),
+            bangumi_id: BangumiId::from(bangumi_id),
+            ..Default::default()
+        }
+    }
+
+    /// Regression: details are keyed by the stable bangumi id. When the key was the display name,
+    /// two different bangumi sharing a title collapsed into one entry, so opening the second one
+    /// showed (and acted on) the first.
+    #[test]
+    fn details_are_keyed_by_id_not_by_name() {
+        let mut details: Cache<BangumiId, Loadable<BangumiItem>> = Cache::new(CACHE_LIMIT);
+        let first = item(1, "同名番剧");
+        let second = item(2, "同名番剧");
+        details.insert(first.bangumi_id, Loadable::Ready(first));
+        details.insert(second.bangumi_id, Loadable::Ready(second));
+
+        assert_eq!(details.iter().count(), 2, "同名不应合并为一条");
+        for id in [1, 2] {
+            let entry = details
+                .get(&BangumiId::from(id))
+                .and_then(Loadable::ready)
+                .expect("两个 id 都应各自可查");
+            assert_eq!(entry.bangumi_id, BangumiId::from(id));
+        }
+    }
 }

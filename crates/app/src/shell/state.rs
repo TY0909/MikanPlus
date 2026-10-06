@@ -69,9 +69,9 @@ impl MikanPlus {
         for update in take_updates() {
             match update {
                 LoadUpdate::Home(result) => self.data.home = result.into(),
-                LoadUpdate::Detail { bid, name, item } => {
+                LoadUpdate::Detail { bid, item } => {
                     self.data.detail_names.remove(&bid);
-                    self.data.details.insert(name, item.into());
+                    self.data.details.insert(bid, item.into());
                 }
                 LoadUpdate::Episodes { key, episodes } => {
                     self.data.episodes.insert(key, episodes.into());
