@@ -60,6 +60,13 @@ impl<T> Loadable<T> {
         }
     }
 
+    pub(crate) fn ready_mut(&mut self) -> Option<&mut T> {
+        match self {
+            Loadable::Ready(value) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Failure reason.
     pub(crate) fn failed(&self) -> Option<&SourceError> {
         match self {
@@ -244,6 +251,10 @@ pub(crate) enum LoadUpdate {
     Search {
         query: String,
         results: Result<SearchResults, SourceError>,
+    },
+    SearchCovers {
+        query: String,
+        covers: HashMap<BangumiId, String>,
     },
 }
 

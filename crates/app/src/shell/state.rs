@@ -115,6 +115,17 @@ impl MikanPlus {
                         }
                     }
                 }
+                LoadUpdate::SearchCovers { query, covers } => {
+                    if let Some(search) = self.data.searches.get_mut(&query)
+                        && let Some(results) = search.results.ready_mut()
+                    {
+                        for item in &mut results.items {
+                            if let Some(cover) = covers.get(&item.bangumi_id) {
+                                item.cover_url = Some(cover.clone());
+                            }
+                        }
+                    }
+                }
             }
         }
     }

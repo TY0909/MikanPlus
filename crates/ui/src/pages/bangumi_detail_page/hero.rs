@@ -106,6 +106,10 @@ pub(super) fn render_hero(
             gpui_kit::div()
                 .relative()
                 .p(px(28.))
+                // The cover is absolutely positioned, so it does not contribute to the
+                // parent's height. Keep enough in-flow height for the full 252×353 poster even
+                // when the summary on the right is short.
+                .min_h(px(409.))
                 // Left: cover displayed at 1.5x (252×353), vertically centered with padding above and below.
                 .child(
                     gpui_kit::div()
