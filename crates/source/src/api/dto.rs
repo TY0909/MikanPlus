@@ -7,10 +7,14 @@
 use domain::{BangumiKind, SeasonName, Weekday};
 use serde::{Deserialize, Deserializer};
 
-/// Generic envelope for list responses (only `items` is read; pagination fields are ignored).
+/// Generic envelope for list responses. The API uses the same envelope for bangumi, search and
+/// episode results, although its `total`/`hasMore` values are not reliable for search.
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub(super) struct Page<T> {
     pub(super) items: Vec<T>,
+    #[serde(default)]
+    pub(super) has_more: Option<bool>,
 }
 
 /// DTO shared by `/api/v1/bangumi` and `/api/v1/bangumi/{id}` (detail fields are absent from list
@@ -59,6 +63,28 @@ pub(super) struct SubtitleGroupDto {
     pub(super) episode_count: u32,
     #[serde(default)]
     pub(super) latest_published_at: Option<String>,
+}
+
+/// One release row returned by both the search and episode APIs.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct EpisodeDto {
+    #[serde(default)]
+    pub(super) bangumi_id: u32,
+    #[serde(default)]
+    pub(super) bangumi_title: String,
+    #[serde(default)]
+    pub(super) title: String,
+    #[serde(default)]
+    pub(super) hash: Option<String>,
+    #[serde(default)]
+    pub(super) size: Option<String>,
+    #[serde(default)]
+    pub(super) published_at: Option<String>,
+    #[serde(default)]
+    pub(super) magnet_url: Option<String>,
+    #[serde(default)]
+    pub(super) torrent_url: Option<String>,
 }
 
 /// Parses a remote Chinese season name (春/夏/秋/冬) into [`SeasonName`].

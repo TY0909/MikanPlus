@@ -1,20 +1,18 @@
-//! On-disk cache: cover images only.
-//!
-//! Live data (home / detail / search) is API-backed and cached in memory for the
-//! lifetime of the app (see `AppData`); only images are persisted, since they are
-//! large and effectively immutable.
+//! On-disk cache for cover images and re-fetchable API data.
 //!
 //! Directory layout (see paths.rs):
 //! ```text
 //! <cache_dir>/
 //! └── images/<resource-key-sha256>  # cover images, cached permanently, 512MB total cap (LRU)
+//! └── api/<resource-key-sha256>     # JSON API data, bounded by an application TTL
 //! ```
 
 use std::{
     path::{Path, PathBuf},
-    time::SystemTime,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 
 /// Soft cap on total image-cache size (bytes)
@@ -74,6 +72,60 @@ fn image_path(url: &str) -> PathBuf {
     crate::paths::app_cache_dir()
         .join("images")
         .join(image_key(url))
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+struct ApiEnvelope<T> {
+    key: String,
+    fetched_at: u64,
+    data: T,
+}
+
+fn api_path(key: &str) -> PathBuf {
+    crate::paths::app_cache_dir()
+        .join("api")
+        .join(url_hash(key))
+}
+
+fn unix_now() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+/// Reads a JSON API entry when it belongs to the requested key and is still within `max_age`.
+/// Invalid or damaged entries are treated as misses and are never overwritten by this function.
+pub fn cached_api<T: DeserializeOwned>(key: &str, max_age: Duration) -> Option<T> {
+    let path = api_path(key);
+    let bytes = std::fs::read(path).ok()?;
+    let envelope: ApiEnvelope<T> = serde_json::from_slice(&bytes).ok()?;
+    let age = unix_now().saturating_sub(envelope.fetched_at);
+    (envelope.key == key && age <= max_age.as_secs()).then_some(envelope.data)
+}
+
+/// Stores one JSON API entry atomically. A failed write leaves the previous complete entry intact.
+pub fn store_api<T: Serialize>(key: &str, data: &T) -> bool {
+    let path = api_path(key);
+    let Some(dir) = path.parent() else {
+        return false;
+    };
+    ensure_dir(dir);
+    let envelope = ApiEnvelope {
+        key: key.to_string(),
+        fetched_at: unix_now(),
+        data,
+    };
+    let Ok(bytes) = serde_json::to_vec(&envelope) else {
+        return false;
+    };
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, &path).is_ok() {
+        true
+    } else {
+        let _ = std::fs::remove_file(&tmp);
+        false
+    }
 }
 
 /// Save an image to the cache (atomic: temp file + rename, preventing a partial

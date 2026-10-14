@@ -1,6 +1,9 @@
 //! Mikan RSS data source (structured XML).
 //!
-//! Used for "all episodes of one subgroup" (detail-page lazy loading):
+//! Kept for compatibility with existing RSS subscription URLs. Detail-page lazy loading now uses
+//! the JSON episode API in [`crate::api`].
+//!
+//! Historical behavior for "all episodes of one subgroup" (detail-page lazy loading):
 //! `GET /RSS/Bangumi?bangumiId=&subgroupid=`.
 //! - Each `<item>`'s `<link>` last segment is the info hash; `<enclosure url>` is
 //!   the direct `.torrent` link

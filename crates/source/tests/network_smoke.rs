@@ -1,4 +1,4 @@
-//! End-to-end network smoke test: real requests to the Mikan API/RSS → list → detail → subgroup episodes → cover cache.
+//! End-to-end network smoke test: real requests to the Mikan API → list → detail → subgroup episodes → cover cache.
 //! Requires network access; on failure it prints the specific error for diagnostics (a restricted network does not fail the run).
 
 #[test]
@@ -66,7 +66,7 @@ fn end_to_end_smoke() {
         return;
     };
 
-    // 4. Lazily load the episodes of the first subtitle group (RSS).
+    // 4. Lazily load the episodes of the first subtitle group (JSON API).
     let Some((group, sid)) = detail
         .subtitle_groups
         .iter()
@@ -76,7 +76,7 @@ fn end_to_end_smoke() {
         eprintln!("NO_SUBGROUP_ID");
         return;
     };
-    match source::rss::fetch_subgroup_episodes(&network, bid, sid) {
+    match source::api::fetch_subgroup_episodes(&network, bid, sid) {
         Ok(episodes) => {
             println!("字幕组「{}」: {} 集", group.name, episodes.len());
             if episodes.is_empty() {
@@ -92,6 +92,6 @@ fn end_to_end_smoke() {
                 "剧集应带磁力链接"
             );
         }
-        Err(e) => eprintln!("RSS_FETCH_FAIL: {e}"),
+        Err(e) => eprintln!("EPISODE_FETCH_FAIL: {e}"),
     }
 }

@@ -1,6 +1,7 @@
 //! Registration of keyboard shortcuts and application actions. Shortcuts target macOS only;
 //! Esc to close overlays is kept cross-platform.
 
+#[cfg(target_os = "macos")]
 use domain::navigation::Page;
 
 #[cfg(target_os = "macos")]

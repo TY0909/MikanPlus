@@ -469,9 +469,13 @@ impl MikanPlus {
             .get(&query)
             .and_then(|search| search.results.failed())
             .cloned();
+        let expired = self.data.searches.get(&query).is_some_and(|search| {
+            search.results.ready().is_some()
+                && search.cached_at.elapsed() >= crate::data::model::SEARCH_CACHE_TTL
+        });
         // Fallback online-search trigger (first render before navigate); an empty query only shows the search UI.
         // Capture the failed state before triggering a reload, so the error view isn't overwritten by Loading.
-        if !query.trim().is_empty() && loaded.is_none() {
+        if !query.trim().is_empty() && (loaded.is_none() || expired) {
             self.load_search(query.clone(), cx);
         }
         let on_search: ui::pages::search_result_page::SearchCallback = {

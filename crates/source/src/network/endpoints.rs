@@ -67,10 +67,10 @@ pub(crate) fn site_url(base: &str, path: &str) -> String {
     }
 }
 
-/// Search-page URL (with the keyword URL-encoded).
-pub(crate) fn search_url(base: &str, query: &str) -> String {
+/// Percent-encodes one query-string value without pulling a URL crate into the source layer.
+fn encode_query(value: &str) -> String {
     let mut encoded = String::new();
-    for b in query.bytes() {
+    for b in value.bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 encoded.push(b as char)
@@ -78,7 +78,47 @@ pub(crate) fn search_url(base: &str, query: &str) -> String {
             _ => encoded.push_str(&format!("%{b:02X}")),
         }
     }
-    format!("{base}/Home/Search?searchstr={encoded}")
+    encoded
+}
+
+/// Home-list API URL. The omitted filters intentionally preserve the server's current-season
+/// default.
+pub(crate) fn home_api_url(base: &str, year: Option<i32>, season: Option<&str>) -> String {
+    let mut url = format!("{base}/api/v1/bangumi");
+    let mut separator = '?';
+    if let Some(year) = year {
+        url.push_str(&format!("{separator}year={year}"));
+        separator = '&';
+    }
+    if let Some(season) = season {
+        url.push_str(&format!("{separator}season={}", encode_query(season)));
+    }
+    url
+}
+
+/// Search API URL. Mikan's edge cache has historically ignored the query portion for some
+/// responses; callers add `Cache-Control: no-cache` when fetching this URL.
+pub(crate) fn search_api_url(base: &str, query: &str, page: usize, page_size: usize) -> String {
+    format!(
+        "{base}/api/v1/search?q={}&page={page}&pageSize={page_size}",
+        encode_query(query)
+    )
+}
+
+/// Episode API URL for one page and optional subtitle-group filter.
+pub(crate) fn episodes_api_url(
+    base: &str,
+    bangumi_id: u32,
+    page: usize,
+    page_size: usize,
+    subgroup_id: Option<u32>,
+) -> String {
+    let mut url =
+        format!("{base}/api/v1/bangumi/{bangumi_id}/episodes?page={page}&pageSize={page_size}");
+    if let Some(subgroup_id) = subgroup_id {
+        url.push_str(&format!("&subtitleGroupId={subgroup_id}"));
+    }
+    url
 }
 
 #[cfg(test)]
@@ -137,5 +177,21 @@ mod tests {
         assert_eq!(alternate_url("https://other.com/x"), None);
         assert_eq!(alternate_url("https://mikanani.me.evil.com/x"), None);
         assert_eq!(alternate_url("/images/a.jpg"), None);
+    }
+
+    #[test]
+    fn api_urls_preserve_filters_and_encode_search() {
+        assert_eq!(
+            home_api_url(BASE_URL, Some(2026), Some("Autumn")),
+            "https://mikanani.me/api/v1/bangumi?year=2026&season=Autumn"
+        );
+        assert_eq!(
+            search_api_url(BASE_URL, "葬送+Frieren", 2, 100),
+            "https://mikanani.me/api/v1/search?q=%E8%91%AC%E9%80%81%2BFrieren&page=2&pageSize=100"
+        );
+        assert_eq!(
+            episodes_api_url(BASE_URL, 3503, 1, 100, Some(583)),
+            "https://mikanani.me/api/v1/bangumi/3503/episodes?page=1&pageSize=100&subtitleGroupId=583"
+        );
     }
 }

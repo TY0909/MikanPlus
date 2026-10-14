@@ -139,6 +139,19 @@ pub(crate) fn get_html(agent: &ureq::Agent, url: &str) -> Result<String, SourceE
         .and_then(read_html_body)
 }
 
+/// Fetches a text response while asking intermediate caches to revalidate the query. This is
+/// important for `/api/v1/search` and filtered episode requests: the upstream cache has returned a
+/// response for a different query in the past.
+pub(crate) fn get_no_cache(agent: &ureq::Agent, url: &str) -> Result<String, SourceError> {
+    agent
+        .get(url)
+        .set("Cache-Control", "no-cache")
+        .set("Pragma", "no-cache")
+        .call()
+        .map_err(map_ureq_error)
+        .and_then(read_html_body)
+}
+
 /// Size limit for binary content (images); exceeding it returns Err (no caching, no success
 /// marker) to avoid silent truncation.
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;

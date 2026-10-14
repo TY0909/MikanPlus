@@ -1,6 +1,6 @@
 //! Bangumi detail data loading.
 
-use crate::data::model::{LoadUpdate, Loadable, publish};
+use crate::data::model::{DETAIL_CACHE_TTL, LoadUpdate, Loadable, publish};
 use crate::prelude::*;
 use crate::shell::state::MikanPlus;
 use domain::BangumiId;
@@ -16,7 +16,17 @@ impl MikanPlus {
         name: String,
         cx: &mut Context<Self>,
     ) {
-        if let Some(Loadable::Ready(_) | Loadable::Loading) = self.data.details.get(&bangumi_id) {
+        if self
+            .data
+            .details
+            .get(&bangumi_id)
+            .is_some_and(Loadable::is_loading)
+            || self
+                .data
+                .detail_cached_at
+                .get(&bangumi_id)
+                .is_some_and(|loaded| loaded.elapsed() < DETAIL_CACHE_TTL)
+        {
             return;
         }
         // Record bid → name so lookups still resolve while this detail is loading
@@ -27,13 +37,25 @@ impl MikanPlus {
         // Keep the list / search name as the fetched item's display name
         let display_name = name.clone();
         let network = self.network.clone();
+        let url = source::api::bangumi_url(&network, bangumi_id);
         self.data.details.insert(bangumi_id, Loadable::Loading);
         cx.notify();
         std::thread::spawn(move || {
-            let item = source::api::fetch_bangumi(&network, bangumi_id).map(|mut item| {
+            let item = if let Some(mut item) =
+                storage::cache::cached_api::<domain::BangumiItem>(&url, DETAIL_CACHE_TTL)
+            {
                 item.name = display_name;
-                item
-            });
+                Ok(item)
+            } else {
+                let result = source::api::fetch_bangumi(&network, bangumi_id).map(|mut item| {
+                    item.name = display_name;
+                    item
+                });
+                if let Ok(item) = &result {
+                    let _ = storage::cache::store_api(&url, item);
+                }
+                result
+            };
             publish(LoadUpdate::Detail {
                 bid: bangumi_id,
                 item,
@@ -49,6 +71,7 @@ impl MikanPlus {
         cx: &mut Context<Self>,
     ) {
         self.data.details.remove(&bangumi_id);
+        self.data.detail_cached_at.remove(&bangumi_id);
         self.load_detail(bangumi_id, name, cx);
     }
 }

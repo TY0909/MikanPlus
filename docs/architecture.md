@@ -26,15 +26,15 @@ Owns serialized domain records and navigation values. It has no GPUI, network, f
 
 ### `storage`
 
-Owns local state, the on-disk cover-image cache, migrations, application directories, filename normalization, and platform operations for opening files and URLs. Live API data (home / detail / search) is cached in memory for the session rather than on disk.
+Owns local state, the on-disk cover-image cache, API-data cache, migrations, application directories, filename normalization, and platform operations for opening files and URLs. Home, detail, and episode API responses are persisted as re-fetchable TTL-bound cache entries; search results remain memory-only because they are temporary query state.
 
 ### `source`
 
 Owns the Mikan data adapters, request throttling and backoff, and URL normalization. It exposes three sources and maps each to `domain` records:
 
-- The public JSON API (`api`): home listing (`GET /api/v1/bangumi`) and bangumi metadata plus subtitle-group summaries (`GET /api/v1/bangumi/{id}`). The API ignores query parameters and does not include episodes.
-- The RSS endpoint (`rss`): a single subtitle group's episodes (`GET /RSS/Bangumi?bangumiId=&subgroupid=`), loaded on demand from the detail page.
-- The search page (`parser`): the only surface without a JSON API, so it keeps HTML parsing.
+- The public JSON API (`api`): home listing (`GET /api/v1/bangumi?year=&season=`), bangumi metadata plus subtitle-group summaries (`GET /api/v1/bangumi/{id}`), keyword search (`GET /api/v1/search?q=&page=&pageSize=`), and paginated subgroup episodes (`GET /api/v1/bangumi/{id}/episodes?page=&pageSize=&subtitleGroupId=`). The home query is derived from the local calendar and falls back to the previous season only when the current season has no released content. Query-sensitive requests ask upstream caches to revalidate.
+- The RSS endpoint (`rss`): retained for compatibility with existing subscription URLs, but it is no longer used to populate detail-page episodes.
+- The HTML parser (`parser`): retained for compatibility and tests while old page-format support is phased out; application search no longer depends on it.
 
 ### `downloader`
 

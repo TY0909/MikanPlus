@@ -131,7 +131,7 @@ pub struct SubtitleGroup {
     #[serde(default)]
     pub subscription_url: Option<String>,
     /// Episode list. The list/detail APIs omit episodes, so entries are filled
-    /// in lazily from RSS (empty by default).
+    /// in lazily from the episode API (empty by default).
     #[serde(default)]
     pub episodes: Vec<Episode>,
     /// Total episode count for this subtitle group (from the API; `episodes`

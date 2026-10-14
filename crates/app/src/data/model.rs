@@ -11,6 +11,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use domain::{
     BangumiGroup, BangumiId, BangumiItem, Episode, SearchResults, SubgroupId, SubgroupRef,
@@ -20,6 +21,13 @@ use source::SourceError;
 
 /// Capacity limit for the bounded cache.
 pub(crate) const CACHE_LIMIT: usize = 64;
+/// API data remains stable for a while, so navigation can reuse the rendered state without
+/// touching the network on every visit.
+pub(crate) const HOME_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+pub(crate) const DETAIL_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+pub(crate) const EPISODE_CACHE_TTL: Duration = Duration::from_secs(30 * 60);
+/// Search is temporary UI state and is intentionally kept only in memory.
+pub(crate) const SEARCH_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
 
 /// Shape of remote data: at any moment a piece of data is in exactly one of
 /// four states.
@@ -87,10 +95,6 @@ impl<K: Clone + std::hash::Hash + Eq, V> Cache<K, V> {
         }
     }
 
-    pub(crate) fn contains(&self, key: &K) -> bool {
-        self.entries.contains_key(key)
-    }
-
     pub(crate) fn get(&self, key: &K) -> Option<&V> {
         self.entries.get(key)
     }
@@ -131,20 +135,24 @@ impl<K: Clone + std::hash::Hash + Eq, V> Cache<K, V> {
 pub(crate) struct Search {
     pub(crate) results: Loadable<SearchResults>,
     pub(crate) page: usize,
+    pub(crate) cached_at: Instant,
 }
 
 /// Data shared across scenes: home / detail / search / subscriptions / lazy episode loading.
 pub(crate) struct AppData {
     /// Home bangumi list.
     pub(crate) home: Loadable<Vec<BangumiGroup>>,
+    pub(crate) home_cached_at: Option<Instant>,
     /// Bangumi details, keyed by the stable [`BangumiId`] rather than the display name, so two
     /// different bangumi that happen to share a title cannot overwrite each other.
     pub(crate) details: Cache<BangumiId, Loadable<BangumiItem>>,
+    pub(crate) detail_cached_at: Cache<BangumiId, Instant>,
     /// bid → display name while a detail is still loading or has failed; once it is ready the name
     /// is read from the cached item.
     pub(crate) detail_names: HashMap<BangumiId, String>,
     /// Lazy subtitle-group episode loading: subgroup reference → data.
     pub(crate) episodes: Cache<SubgroupRef, Loadable<Vec<Episode>>>,
+    pub(crate) episode_cached_at: Cache<SubgroupRef, Instant>,
     /// Subtitle groups expanded on the detail page.
     pub(crate) expanded: HashSet<SubgroupRef>,
     /// Online searches: keyword → data.
@@ -159,9 +167,12 @@ impl AppData {
     pub(crate) fn new(state: &storage::State) -> Self {
         Self {
             home: Loadable::Idle,
+            home_cached_at: None,
             details: Cache::new(CACHE_LIMIT),
+            detail_cached_at: Cache::new(CACHE_LIMIT),
             detail_names: HashMap::new(),
             episodes: Cache::new(CACHE_LIMIT),
+            episode_cached_at: Cache::new(CACHE_LIMIT),
             expanded: HashSet::new(),
             searches: Cache::new(CACHE_LIMIT),
             subscriptions: state.subscriptions(),

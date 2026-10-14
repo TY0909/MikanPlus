@@ -84,6 +84,19 @@ impl Network {
         result
     }
 
+    /// Fetches a text response with cache revalidation headers. Use this for API requests whose
+    /// query parameters are part of the resource identity.
+    pub fn fetch_no_cache(&self, url: &str) -> Result<String, SourceError> {
+        if self.in_backoff(url) {
+            return Err(SourceError::Throttled);
+        }
+        self.acquire_slot();
+        let result = http::get_no_cache(self.agent(), url);
+        self.release_slot();
+        self.record(url, &result);
+        result
+    }
+
     /// Downloads binary content (images). With throttling / backoff / concurrency control; returns
     /// [`SourceError::Throttled`] while in backoff.
     pub fn fetch_bytes(&self, url: &str) -> Result<Vec<u8>, SourceError> {
@@ -263,7 +276,28 @@ impl Network {
 
     /// Search-page URL for the current data source.
     pub fn search_url(&self, query: &str) -> String {
-        endpoints::search_url(self.base_url(), query)
+        endpoints::search_api_url(self.base_url(), query, 1, 100)
+    }
+
+    /// Home-list API URL for an optional year/season filter.
+    pub fn home_api_url(&self, year: Option<i32>, season: Option<&str>) -> String {
+        endpoints::home_api_url(self.base_url(), year, season)
+    }
+
+    /// Search API URL for one server-side page.
+    pub fn search_api_url(&self, query: &str, page: usize, page_size: usize) -> String {
+        endpoints::search_api_url(self.base_url(), query, page, page_size)
+    }
+
+    /// Episode API URL for one server-side page.
+    pub fn episodes_api_url(
+        &self,
+        bangumi_id: u32,
+        page: usize,
+        page_size: usize,
+        subgroup_id: Option<u32>,
+    ) -> String {
+        endpoints::episodes_api_url(self.base_url(), bangumi_id, page, page_size, subgroup_id)
     }
 
     /// Rewrites a URL on a known data-source host to the currently selected host.

@@ -7662,6 +7662,7 @@ dependencies = [
 name = "source"
 version = "0.2.6"
 dependencies = [
+ "chrono",
  "domain",
  "roxmltree 0.20.0",
  "scraper",
@@ -7726,6 +7727,7 @@ version = "0.2.6"
 dependencies = [
  "domain",
  "filetime",
+ "serde",
  "serde_json",
  "sha2 0.10.9",
 ]

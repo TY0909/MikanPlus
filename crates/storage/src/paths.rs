@@ -37,7 +37,7 @@ pub fn app_data_dir() -> PathBuf {
     }
 }
 
-/// Cache directory (cover images only — re-fetchable, may be cleared by the system)
+/// Cache directory (re-fetchable cover images and API responses; may be cleared by the system)
 pub fn app_cache_dir() -> PathBuf {
     let name = "MikanPlus";
     #[cfg(target_os = "macos")]

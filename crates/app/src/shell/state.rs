@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::rc::Rc;
+use std::time::Instant;
 
 use gpui_kit::component::input::InputState;
 use gpui_kit::{App, Entity, ScrollHandle, Window};
@@ -68,24 +69,47 @@ impl MikanPlus {
     pub(crate) fn settle_updates(&mut self) {
         for update in take_updates() {
             match update {
-                LoadUpdate::Home(result) => self.data.home = result.into(),
+                LoadUpdate::Home(result) => {
+                    let ok = result.is_ok();
+                    self.data.home = result.into();
+                    self.data.home_cached_at = ok.then(Instant::now);
+                }
                 LoadUpdate::Detail { bid, item } => {
+                    let ok = item.is_ok();
                     self.data.detail_names.remove(&bid);
                     self.data.details.insert(bid, item.into());
+                    if ok {
+                        self.data.detail_cached_at.insert(bid, Instant::now());
+                    } else {
+                        self.data.detail_cached_at.remove(&bid);
+                    }
                 }
                 LoadUpdate::Episodes { key, episodes } => {
+                    let ok = episodes.is_ok();
                     self.data.episodes.insert(key, episodes.into());
+                    if ok {
+                        self.data.episode_cached_at.insert(key, Instant::now());
+                    } else {
+                        self.data.episode_cached_at.remove(&key);
+                    }
                 }
                 LoadUpdate::Search { query, results } => {
+                    let ok = results.is_ok();
                     let settled = results.into();
                     match self.data.searches.get_mut(&query) {
-                        Some(entry) => entry.results = settled,
+                        Some(entry) => {
+                            entry.results = settled;
+                            if ok {
+                                entry.cached_at = Instant::now();
+                            }
+                        }
                         None => {
                             self.data.searches.insert(
                                 query,
                                 Search {
                                     results: settled,
                                     page: 0,
+                                    cached_at: Instant::now(),
                                 },
                             );
                         }
