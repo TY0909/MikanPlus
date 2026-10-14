@@ -19,6 +19,39 @@ use crate::data::model::{AppData, Cache, LoadUpdate, Overlays, Search, take_upda
 /// Maximum navigation history length (back stack).
 pub(crate) const HISTORY_LIMIT: usize = 100;
 
+/// Navigation state for one top-level section.
+///
+/// The root page owns the section's persistent view state (for example, the selected home
+/// filter). The history contains only temporary pages opened from that root, such as details and
+/// search results.
+pub(crate) struct SectionNavigation {
+    pub(crate) root: Page,
+    pub(crate) history: Vec<Page>,
+}
+
+impl SectionNavigation {
+    pub(crate) fn new(root: Page) -> Self {
+        Self {
+            root,
+            history: Vec::new(),
+        }
+    }
+
+    /// Return the page currently active in this section.
+    pub(crate) fn current_page(&self) -> Page {
+        self.history
+            .last()
+            .cloned()
+            .unwrap_or_else(|| self.root.clone())
+    }
+
+    /// Return to the section root while preserving the root page's state.
+    pub(crate) fn return_to_root(&mut self) -> Page {
+        self.history.clear();
+        self.root.clone()
+    }
+}
+
 /// Close / go-back style callback.
 pub type GoBackCallback = Rc<dyn Fn(&mut Window, &mut App)>;
 /// Home card click callback.
@@ -37,8 +70,8 @@ pub(crate) struct MikanPlus {
     pub(crate) page: Page,
     /// Active top-level section.
     pub(crate) section: Section,
-    /// Per-section navigation stacks; the last element of a section's stack is its current page.
-    pub(crate) stacks: HashMap<Section, Vec<Page>>,
+    /// Persistent root and temporary child history for each top-level section.
+    pub(crate) sections: HashMap<Section, SectionNavigation>,
     pub(crate) window_handle: gpui_kit::AnyWindowHandle,
     /// Cross-scene data model.
     pub(crate) data: AppData,

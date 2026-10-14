@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use crate::data::model::{AppData, CACHE_LIMIT, Cache, Overlays, load_version};
 use crate::prelude::*;
-use crate::shell::state::MikanPlus;
+use crate::shell::state::{MikanPlus, SectionNavigation};
 
 impl MikanPlus {
     pub(crate) fn new(
@@ -30,7 +30,10 @@ impl MikanPlus {
             let mut this = Self {
                 page: Page::Home(HomeFilter::Today),
                 section: Section::Home,
-                stacks: HashMap::from([(Section::Home, vec![Page::Home(HomeFilter::Today)])]),
+                sections: HashMap::from([(
+                    Section::Home,
+                    SectionNavigation::new(Page::Home(HomeFilter::Today)),
+                )]),
                 window_handle: window.window_handle(),
                 data: AppData::new(&state),
                 overlays: Overlays::default(),
