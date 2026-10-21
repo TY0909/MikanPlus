@@ -16,6 +16,42 @@ MikanPlus 是一款桌面追番应用，数据来源于[蜜柑计划](https://mi
 - 取消订阅前确认是否移除对应的下载目录和文件,默认保留下载内容
 - 支持深色和浅色主题
 
+## 安装
+
+### Linux
+
+默认使用用户级 AppImage 安装，不需要 root：
+
+```bash
+curl -fsSL https://github.com/TY0909/MikanPlus/releases/latest/download/MikanPlus-linux-install.sh | bash
+```
+
+安装完成后可用命令启动和卸载：
+
+```bash
+mikanplus
+mikanplus --uninstall
+```
+
+默认卸载会保留配置、缓存和下载文件。完全删除配置和缓存：
+
+```bash
+mikanplus --uninstall --purge
+```
+
+需要所有用户使用时，可以选择系统级安装：
+
+```bash
+curl -fsSL https://github.com/TY0909/MikanPlus/releases/latest/download/MikanPlus-linux-install.sh \
+  | sudo bash -s -- --system
+```
+
+Linux 发布版本面向 x86_64、glibc ≥ 2.35（Ubuntu 22.04+ / Debian 12+）。也可以从 Releases 下载 `.deb` 或便携版 tar.gz。
+
+### Windows / macOS
+
+从 [Releases](https://github.com/TY0909/MikanPlus/releases) 下载安装包：Windows 使用 `.exe` 安装器或 `.zip` 便携版，macOS 使用 `.dmg`。
+
 ## 使用说明
 
 1. 在首页浏览或搜索感兴趣的番剧。

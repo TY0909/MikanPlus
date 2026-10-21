@@ -163,6 +163,9 @@ jobs:
           chmod +x linuxdeploy-x86_64.AppImage
           mkdir -p AppDir
           cp packaging/linux/mikanplus.desktop AppDir/
+          # AssetSource 会从可执行文件旁边查找项目资源,因此必须一起放入 AppImage
+          mkdir -p AppDir/usr/bin
+          cp -r assets AppDir/usr/bin/
           # linuxdeploy 只接受标准尺寸图标(如 512x512),mikan-pic.png 为 400x400
           # (用 convert:Ubuntu 22.04 的 imagemagick 6.x 没有 magick 命令)
           convert assets/mikan-pic.png -resize 512x512 AppDir/mikanplus.png
@@ -177,9 +180,20 @@ jobs:
             --desktop-file AppDir/mikanplus.desktop \
             --icon-file AppDir/mikanplus.png \
             --output appimage
+          test -x AppDir/usr/bin/MikanPlus
+          test -f AppDir/usr/bin/assets/mikan-pic.png
           # appimagetool 的输出名随版本变化(新版会带版本号),用通配符统一改名
           rm -f "MikanPlus-$VERSION-linux-x86_64.AppImage"
           mv MikanPlus-*-x86_64.AppImage "MikanPlus-$VERSION-linux-x86_64.AppImage"
+          cp assets/mikan-pic.png MikanPlus-linux-icon.png
+          sha256sum \
+            "MikanPlus-$VERSION-linux-x86_64.tar.gz" \
+            "mikanplus_${VERSION}_amd64.deb" \
+            "MikanPlus-$VERSION-linux-x86_64.AppImage" \
+            MikanPlus-linux-icon.png > SHA256SUMS
+
+      - name: Stage install script
+        run: cp packaging/linux/install.sh MikanPlus-linux-install.sh
 
       - name: Upload to GitHub Release
         shell: bash
@@ -194,9 +208,15 @@ jobs:
             MikanPlus-${{ env.VERSION }}-linux-x86_64.tar.gz \
             mikanplus_${{ env.VERSION }}_amd64.deb \
             MikanPlus-${{ env.VERSION }}-linux-x86_64.AppImage \
+            MikanPlus-linux-install.sh \
+            MikanPlus-linux-icon.png \
+            SHA256SUMS \
             --notes-file "docs/releases/${GITHUB_REF_NAME}.md" 2>/dev/null \
             || gh release upload "$GITHUB_REF_NAME" \
               MikanPlus-${{ env.VERSION }}-linux-x86_64.tar.gz \
               mikanplus_${{ env.VERSION }}_amd64.deb \
               MikanPlus-${{ env.VERSION }}-linux-x86_64.AppImage \
+              MikanPlus-linux-install.sh \
+              MikanPlus-linux-icon.png \
+              SHA256SUMS \
               --clobber

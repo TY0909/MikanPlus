@@ -63,6 +63,31 @@ TMPDIR="$PWD/target/tmp" cargo test --workspace --all-features --locked
 
 不要把 GPUI Kit 已内置的图标复制到项目中。本地同名资源会覆盖 GPUI Kit 资源，只应在确实需要定制视觉时添加。
 
+## Linux 安装脚本
+
+`packaging/linux/install.sh` 是随 Linux Release 发布的 AppImage 安装器。默认执行用户级安装，不需要 root：
+
+```bash
+curl -fsSL https://github.com/TY0909/MikanPlus/releases/latest/download/MikanPlus-linux-install.sh | bash
+```
+
+安装器的约定：
+
+- 默认安装到 `~/.local/opt/mikanplus`，命令入口为 `~/.local/bin/mikanplus`。
+- `mikanplus --uninstall` 只移除程序、桌面入口与图标，保留用户数据与下载内容。
+- `mikanplus --uninstall --purge` 才会删除当前用户的配置和缓存。
+- 系统级安装使用 `sudo bash -s -- --system`，安装到 `/opt/mikanplus`，命令入口为 `/usr/local/bin/mikanplus`。
+- AppImage、图标和 `SHA256SUMS` 均来自同一个 GitHub Release；安装器会校验 AppImage 的 SHA-256。
+- 安装清单和本地卸载器随程序保存，卸载不依赖网络。
+- `.deb` 和 tar.gz 是可选分发格式，统一安装器默认使用 AppImage。
+
+修改脚本后至少执行语法与帮助检查：
+
+```bash
+bash -n packaging/linux/install.sh
+bash packaging/linux/install.sh --help
+```
+
 ## 质量门禁
 
 提交前应确保以下命令全部通过：
